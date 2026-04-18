@@ -185,6 +185,8 @@ function App() {
   // Roster editor
   const [addingTo, setAddingTo] = useState(null);
   const [newName, setNewName]   = useState("");
+  // Mid queue order overrides — array of player ids in desired order (rebuilt each quarter)
+  const [midQueueOrder, setMidQueueOrder] = useState([]);
 
   const intervalRef = useRef(null);
 
@@ -258,7 +260,19 @@ function App() {
   const atkPool   = pool.filter(p => curAssign.find(a => a.id === p.id && a.qRole === "Attack"));
   const midPool   = pool.filter(p => curAssign.find(a => a.id === p.id && a.qRole === "Midfield"));
   // Full mid queue: midOnly players first, then pool kids assigned to mid this quarter
-  const fullMidQueue = [...midOnly, ...midPool];
+  // Respects midQueueOrder if set (for in-game reordering)
+  const defaultMidQueue = [...midOnly, ...midPool];
+  const fullMidQueue = midQueueOrder.length > 0
+    ? [...midQueueOrder.map(id => defaultMidQueue.find(p => p.id === id)).filter(Boolean),
+       ...defaultMidQueue.filter(p => !midQueueOrder.includes(p.id))]
+    : defaultMidQueue;
+
+  function moveMidQueuePlayer(fromIdx, toIdx) {
+    const ids = fullMidQueue.map(p => p.id);
+    const [moved] = ids.splice(fromIdx, 1);
+    ids.splice(toIdx, 0, moved);
+    setMidQueueOrder(ids);
+  }
 
   // ── Swap logic ─────────────────────────────────────────────────────────────
   function swapPlayers(aId, targetPos, targetSlotIdx) {
@@ -307,12 +321,12 @@ function App() {
 
   // ── Rotate Mid: full pair swap using fullMidQueue (midOnly + pool mid kids) ─
   function rotateMid() {
-    const onField  = field.Midfield.filter(Boolean);
-    const benchMid = fullMidQueue.filter(p => !onField.includes(p.id));
+    const onFieldIds = field.Midfield.filter(Boolean);
+    const benchMid   = fullMidQueue.filter(p => !onFieldIds.includes(p.id));
     if (benchMid.length === 0) return;
     const swapCount = Math.min(benchMid.length, FIELD_SPOTS.Midfield);
     const incoming  = benchMid.slice(0, swapCount).map(p => p.id);
-    const outgoing  = [...onField]
+    const outgoing  = [...onFieldIds]
       .sort((a, b) => (allPlayers.find(p => p.id === b)?.times.Midfield ?? 0) - (allPlayers.find(p => p.id === a)?.times.Midfield ?? 0))
       .slice(0, swapCount);
 
@@ -349,12 +363,11 @@ function App() {
     } else if (selected.id === pid) {
       setSelected(null);
     } else if (selected.pos) {
-      // Selected was a field player — swap selected into bench, bench player takes slot
-      swapPlayers(selected.id, selected.pos, selected.slotIdx);
-      // Actually: put pid into selected's slot
-      setSelected(null);
-      setTimeout(() => swapPlayers(pid, selected?.pos ?? "bench", selected?.slotIdx ?? 0), 0);
+      // A field player is selected — put bench player into that slot,
+      // swapPlayers handles sending the field player to bench atomically
+      swapPlayers(pid, selected.pos, selected.slotIdx);
     } else {
+      // Both are bench players — just switch selection
       setSelected({ id: pid });
     }
   }
@@ -382,7 +395,7 @@ function App() {
       pool.map(p => ({ id: p.id, qRole: editQBreak.find(a => a.id === p.id)?.qRole ?? "Midfield" })),
       midOnly, defense, goalies
     ));
-    setQuarter(nextQ); setQElapsed(0); setShowQBreak(false); setSelected(null);
+    setQuarter(nextQ); setQElapsed(0); setShowQBreak(false); setSelected(null); setMidQueueOrder([]);
   }
 
   function toggleQBreakRole(id) {
@@ -429,7 +442,7 @@ function App() {
 
   function resetGame() {
     setRunning(false); setQElapsed(0); setQuarter(1); setSelected(null);
-    setShowQBreak(false); setResumeGame(null); clearGame();
+    setShowQBreak(false); setResumeGame(null); clearGame(); setMidQueueOrder([]);
     const r = loadRoster();
     const fp = (r?.pool    ?? DEFAULT_POOL   ).map(p => initPlayer(p, "pool"));
     const fm = (r?.midOnly ?? DEFAULT_MID_ONLY).map(p => initPlayer(p, "midOnly"));
@@ -714,6 +727,47 @@ function App() {
             onRotate={fullMidQueue.filter(p => !field.Midfield.includes(p.id)).length > 0 ? rotateMid : null}
             nextLabel={(() => { const b = fullMidQueue.filter(p => !field.Midfield.includes(p.id)); return b.slice(0, 2).map(p => p.name).join(", "); })()}
           />
+
+          {/* Mid queue groupings */}
+          {fullMidQueue.length > 0 && (
+            <div style={{ marginBottom: 14, background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 12px" }}>
+              <div style={{ fontSize: 10, fontWeight: 800, color: posColor.Midfield, letterSpacing: 1, marginBottom: 8 }}>🔄 MID LINES — tap ▲▼ to reorder</div>
+              {fullMidQueue.map((p, i) => {
+                const isOnField = field.Midfield.includes(p.id);
+                const isSel     = selected?.id === p.id;
+                const lineNum   = Math.floor(i / 2) + 1;
+                const isFirstInLine = i % 2 === 0;
+                const isMidOnly = midOnly.some(m => m.id === p.id);
+                return (
+                  <div key={p.id}>
+                    {isFirstInLine && (
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4, marginTop: i > 0 ? 8 : 0 }}>
+                        <div style={{ flex: 1, height: 1, background: C.border }} />
+                        <span style={{ fontSize: 9, fontWeight: 800, color: isOnField || (fullMidQueue[i+1] && field.Midfield.includes(fullMidQueue[i+1].id)) ? posColor.Midfield : C.muted, letterSpacing: 1 }}>
+                          LINE {lineNum}{lineNum === 1 ? " · ON" : ""}
+                        </span>
+                        <div style={{ flex: 1, height: 1, background: C.border }} />
+                      </div>
+                    )}
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                      <div style={{ width: 7, height: 7, borderRadius: "50%", background: isOnField ? posColor.Midfield : C.border, flexShrink: 0 }} />
+                      <div style={{ flex: 1, fontSize: 13, fontWeight: 700, color: isOnField ? C.text : C.muted }}>
+                        {p.name}
+                        {isMidOnly && <span style={{ fontSize: 9, color: posColor.Midfield, marginLeft: 5 }}>mid only</span>}
+                      </div>
+                      <span style={{ fontSize: 10, color: C.muted }}>{fmt(p.times.Midfield)}</span>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                        <button onClick={() => i > 0 && moveMidQueuePlayer(i, i - 1)}
+                          style={{ background: "none", border: "none", color: i > 0 ? C.muted : C.border, cursor: i > 0 ? "pointer" : "default", fontSize: 10, padding: "1px 4px", lineHeight: 1 }}>▲</button>
+                        <button onClick={() => i < fullMidQueue.length - 1 && moveMidQueuePlayer(i, i + 1)}
+                          style={{ background: "none", border: "none", color: i < fullMidQueue.length - 1 ? C.muted : C.border, cursor: i < fullMidQueue.length - 1 ? "pointer" : "default", fontSize: 10, padding: "1px 4px", lineHeight: 1 }}>▼</button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
 
           {/* Defense */}
           <PositionSection pos="Defense" field={field} players={allPlayers} selected={selected} onTapSlot={tapSlot} C={C} />
