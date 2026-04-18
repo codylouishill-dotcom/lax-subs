@@ -342,6 +342,14 @@ function App() {
       for (const pos of Object.keys(slots)) next[pos] = slots[pos].filter(x => x !== null);
       return next;
     });
+
+    // Cycle outgoing players to the back of the queue so the next line comes up
+    setMidQueueOrder(() => {
+      const currentOrder = fullMidQueue.map(p => p.id);
+      const remaining = currentOrder.filter(id => !outgoing.includes(id));
+      return [...remaining, ...outgoing];
+    });
+
     setSelected(null);
   }
 
