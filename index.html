@@ -75,70 +75,75 @@ function suggestSplit(poolPlayers, atkSpots, midSpots) {
 
 // Build field slots for a quarter from quarter assignments + midOnly players
 function buildField(quarterAssignments, midOnlyPlayers, defPlayers, gkPlayers) {
-  const atkPool = quarterAssignments.filter(p => p.qRole === "Attack").map(p => p.id);
-  // Mid queue = midOnly first, then pool kids assigned to mid
+  const atkIds    = quarterAssignments.filter(p => p.qRole === "Attack").map(p => p.id);
   const midFromPool = quarterAssignments.filter(p => p.qRole === "Midfield").map(p => p.id);
-  const midQueue = [...midOnlyPlayers.map(p => p.id), ...midFromPool];
+  // Mid queue: midOnly first, then pool kids assigned to mid this quarter
+  const midQueue  = [...midOnlyPlayers.map(p => p.id), ...midFromPool];
   return {
-    Attack:   atkPool.slice(0, FIELD_SPOTS.Attack),
+    Attack:   atkIds.slice(0, FIELD_SPOTS.Attack),
     Midfield: midQueue.slice(0, FIELD_SPOTS.Midfield),
     Defense:  defPlayers.slice(0, FIELD_SPOTS.Defense).map(p => p.id),
     Goalie:   gkPlayers.slice(0, FIELD_SPOTS.Goalie).map(p => p.id),
   };
 }
 
-// Split pool into Attack/Mid ensuring Attack >= 2 and Midfield is even.
-// Players are sorted by attackTime asc so those with least attack time go to Attack.
-// Optional: pass existing times to sort by; otherwise splits evenly.
+// Compute how many pool kids go to Mid per quarter:
+// largest even number such that mid-from-pool >= 0 and total pool kids are all assigned.
+// Attack gets the remainder (n - midFromPoolCount), can be odd or even.
+function midFromPoolCount(n) {
+  if (n <= 0) return 0;
+  // Start at n and work down to find largest even number leaving rest for attack
+  // We want midCount even, midCount <= n, and (n - midCount) >= 0
+  // Also ensure at least FIELD_SPOTS.Attack players go to attack if possible
+  let mid = n % 2 === 0 ? n : n - 1; // largest even <= n
+  // Ensure attack gets at least FIELD_SPOTS.Attack players (2)
+  while (mid > 0 && (n - mid) < FIELD_SPOTS.Attack) mid -= 2;
+  if (mid < 0) mid = 0;
+  return mid;
+}
+
+// Single-quarter balanced split (used for display/fallback)
 function balancedSplit(poolPlayers, sortByAttackAsc = false) {
   const n = poolPlayers.length;
   if (n === 0) return [];
-  // Determine midfield count: even number, leaving at least 2 for attack
-  // Start from largest even number that leaves >= 2 for attack
-  let midCount = n - 2; // max possible mid keeping 2 attack
-  if (midCount % 2 !== 0) midCount -= 1; // make even
-  if (midCount < 0) midCount = 0;
+  const midCount = midFromPoolCount(n);
   const atkCount = n - midCount;
-
   const ordered = sortByAttackAsc
     ? [...poolPlayers].sort((a, b) => (a.times?.Attack ?? 0) - (b.times?.Attack ?? 0))
     : poolPlayers;
-
   return ordered.map((p, i) => ({ id: p.id, qRole: i < atkCount ? "Attack" : "Midfield" }));
 }
-// Distribute Attack/Mid roles across all quarters so each player gets
-// as equal a number of Attack quarters as possible.
-// Uses FIELD_SPOTS.Attack as the number of Attack players per quarter.
+
+// Distribute Attack/Mid across all quarters so each player gets as equal
+// Attack-quarter count as possible. Mid pool count is even each quarter.
 function balanceAllQuarters(poolPlayers, numQuarters) {
   const n = poolPlayers.length;
-  if (n === 0) return Array(numQuarters).fill([]);
+  if (n === 0) return Array.from({ length: numQuarters }, () => []);
 
-  // How many pool kids play Attack per quarter — at least 2, at most n-2
-  const atkPerQ = Math.min(Math.max(FIELD_SPOTS.Attack, 2), Math.max(n - 2, 2));
+  const midPerQ = midFromPoolCount(n); // even, same each quarter
+  const atkPerQ = n - midPerQ;         // remainder, can be odd or even
 
   // Total Attack slots across all quarters
   const totalAtkSlots = atkPerQ * numQuarters;
   const baseAtk = Math.floor(totalAtkSlots / n);
   const extras  = totalAtkSlots % n;
 
-  // Give each player their Attack quota (some get baseAtk+1)
-  const atkQuota = poolPlayers.map((p, i) => ({
+  // Give each player an Attack quota
+  const quota = poolPlayers.map((p, i) => ({
     id: p.id,
     quota: baseAtk + (i < extras ? 1 : 0),
     used: 0,
   }));
 
-  // Build each quarter: pick the atkPerQ players with most remaining quota
-  const quarters = [];
-  for (let q = 0; q < numQuarters; q++) {
-    const sorted = [...atkQuota].sort((a, b) =>
+  // Build each quarter: pick atkPerQ players with most remaining quota
+  return Array.from({ length: numQuarters }, () => {
+    const sorted = [...quota].sort((a, b) =>
       (b.quota - b.used) - (a.quota - a.used) || a.id - b.id
     );
     const atkIds = sorted.slice(0, atkPerQ).map(x => x.id);
-    atkIds.forEach(id => { const e = atkQuota.find(x => x.id === id); if (e) e.used++; });
-    quarters.push(poolPlayers.map(p => ({ id: p.id, qRole: atkIds.includes(p.id) ? "Attack" : "Midfield" })));
-  }
-  return quarters;
+    atkIds.forEach(id => { const e = quota.find(x => x.id === id); if (e) e.used++; });
+    return poolPlayers.map(p => ({ id: p.id, qRole: atkIds.includes(p.id) ? "Attack" : "Midfield" }));
+  });
 }
 const GAME_KEY     = "lax_game_v1";
 
