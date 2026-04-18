@@ -106,7 +106,44 @@ function balancedSplit(poolPlayers, sortByAttackAsc = false) {
 
   return ordered.map((p, i) => ({ id: p.id, qRole: i < atkCount ? "Attack" : "Midfield" }));
 }
-const ROSTER_KEY   = "lax_roster_v1";
+// Distribute Attack/Mid roles across all quarters so each player gets
+// as equal a number of Attack quarters as possible.
+// atkPerQuarter = how many pool kids play Attack each quarter (same as balancedSplit gives)
+function balanceAllQuarters(poolPlayers, numQuarters) {
+  const n = poolPlayers.length;
+  if (n === 0) return Array(numQuarters).fill([]);
+
+  // Determine how many Attack slots per quarter (same logic as balancedSplit)
+  let midCount = n - 2;
+  if (midCount % 2 !== 0) midCount -= 1;
+  if (midCount < 0) midCount = 0;
+  const atkPerQ = n - midCount;
+
+  // Total Attack slots across all quarters
+  const totalAtkSlots = atkPerQ * numQuarters;
+  // Base Attack quarters per player, remainder gets +1
+  const baseAtk = Math.floor(totalAtkSlots / n);
+  const extras   = totalAtkSlots % n;
+
+  // Assign each player their Attack quarter count
+  // Shuffle to spread extras evenly — use index as stable ordering
+  const atkQuota = poolPlayers.map((p, i) => ({
+    id: p.id,
+    quota: baseAtk + (i < extras ? 1 : 0),
+    used: 0,
+  }));
+
+  // Build each quarter greedily: pick players with most remaining quota
+  const quarters = [];
+  for (let q = 0; q < numQuarters; q++) {
+    // Sort by remaining quota desc, then by id for stability
+    const sorted = [...atkQuota].sort((a, b) => (b.quota - b.used) - (a.quota - a.used));
+    const atkIds = sorted.slice(0, atkPerQ).map(x => x.id);
+    atkIds.forEach(id => { const entry = atkQuota.find(x => x.id === id); if (entry) entry.used++; });
+    quarters.push(poolPlayers.map(p => ({ id: p.id, qRole: atkIds.includes(p.id) ? "Attack" : "Midfield" })));
+  }
+  return quarters;
+}
 const GAME_KEY     = "lax_game_v1";
 
 function saveRoster(pool, midOnly, defense, goalies) {
@@ -158,7 +195,8 @@ function App() {
   const initDef     = (savedRoster?.defense ?? DEFAULT_DEFENSE).map(p => initPlayer(p, "defense"));
   const initGk      = (savedRoster?.goalies ?? DEFAULT_GOALIE ).map(p => initPlayer(p, "goalie"));
 
-  const defaultBase = balancedSplit(initPool);
+  const defaultBase     = balanceAllQuarters(initPool, NUM_QUARTERS);
+  const defaultBaseQ1   = defaultBase[0] ?? [];
 
   // Roster
   const [pool,    setPool]    = useState(initPool);
@@ -171,9 +209,9 @@ function App() {
   const [running, setRunning]   = useState(false);
   const [qElapsed, setQElapsed] = useState(0);
 
-  const [qAssignments, setQAssignments] = useState(() => [defaultBase, defaultBase, defaultBase, defaultBase]);
+  const [qAssignments, setQAssignments] = useState(() => defaultBase);
 
-  const [field, setField] = useState(() => buildField(defaultBase, initMidOnly, initDef, initGk));
+  const [field, setField] = useState(() => buildField(defaultBaseQ1, initMidOnly, initDef, initGk));
 
   // UI state
   const [activeTab, setActiveTab]   = useState("plan");
@@ -223,14 +261,12 @@ function App() {
   // ── Persist roster whenever it changes ────────────────────────────────────
   useEffect(() => { saveRoster(pool, midOnly, defense, goalies); }, [pool, midOnly, defense, goalies]);
 
-  // ── Auto-save game state every 5 seconds while running ────────────────────
+  // ── Save game state whenever anything important changes ────────────────────
   useEffect(() => {
-    if (!running) return;
-    const id = setInterval(() => {
-      saveGame({ pool, midOnly, defense, goalies, quarter, qElapsed, qAssignments, field });
-    }, 5000);
-    return () => clearInterval(id);
-  }, [running, pool, midOnly, defense, goalies, quarter, qElapsed, qAssignments, field]);
+    // Always save so a refresh can resume — skip only if no game has started
+    if (quarter === 1 && qElapsed === 0) return;
+    saveGame({ pool, midOnly, defense, goalies, quarter, qElapsed, qAssignments, field, midQueueOrder });
+  }, [pool, midOnly, defense, goalies, quarter, qElapsed, qAssignments, field, midQueueOrder]);
 
   // ── Warn before leaving while game is running ──────────────────────────────
   useEffect(() => {
@@ -445,6 +481,7 @@ function App() {
     setPool(saved.pool); setMidOnly(saved.midOnly ?? []); setDefense(saved.defense); setGoalies(saved.goalies);
     setQuarter(saved.quarter); setQElapsed(saved.qElapsed);
     setQAssignments(saved.qAssignments); setField(saved.field);
+    setMidQueueOrder(saved.midQueueOrder ?? []);
     setResumeGame(null); setActiveTab("game");
   }
 
@@ -457,9 +494,9 @@ function App() {
     const fd = (r?.defense ?? DEFAULT_DEFENSE).map(p => initPlayer(p, "defense"));
     const fg = (r?.goalies ?? DEFAULT_GOALIE ).map(p => initPlayer(p, "goalie"));
     setPool(fp); setMidOnly(fm); setDefense(fd); setGoalies(fg);
-    const base = balancedSplit(fp);
-    setQAssignments([base, base, base, base]);
-    setField(buildField(base, fm, fd, fg));
+    const base = balanceAllQuarters(fp, NUM_QUARTERS);
+    setQAssignments(base);
+    setField(buildField(base[0], fm, fd, fg));
   }
 
   const selPlayer = selected ? allPlayers.find(p => p.id === selected.id) : null;
@@ -595,7 +632,16 @@ function App() {
 
           {/* Quarter assignment grid */}
           <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 14, marginBottom: 20 }}>
-            <div style={{ fontSize: 11, fontWeight: 800, color: C.muted, letterSpacing: 1, marginBottom: 12 }}>QUARTER ASSIGNMENTS — ATTACK/MID POOL</div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+              <span style={{ fontSize: 11, fontWeight: 800, color: C.muted, letterSpacing: 1 }}>QUARTER ASSIGNMENTS — ATTACK/MID POOL</span>
+              <button onClick={() => {
+                const balanced = balanceAllQuarters(pool, NUM_QUARTERS);
+                setQAssignments(balanced);
+              }}
+                style={{ background: `${C.accent}18`, border: `1px solid ${C.accent}55`, borderRadius: 6, color: C.accent, padding: "3px 10px", fontSize: 10, fontWeight: 800, cursor: "pointer" }}>
+                ⚖ Auto-Balance
+              </button>
+            </div>
             {Array.from({ length: NUM_QUARTERS }).map((_, qi) => {
               const qa = qAssignments[qi];
               const atkGroup = pool.filter(p => qa.find(a => a.id === p.id && a.qRole === "Attack"));
@@ -736,47 +782,6 @@ function App() {
             nextLabel={(() => { const b = fullMidQueue.filter(p => !field.Midfield.includes(p.id)); return b.slice(0, 2).map(p => p.name).join(", "); })()}
           />
 
-          {/* Mid queue groupings */}
-          {fullMidQueue.length > 0 && (
-            <div style={{ marginBottom: 14, background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 12px" }}>
-              <div style={{ fontSize: 10, fontWeight: 800, color: posColor.Midfield, letterSpacing: 1, marginBottom: 8 }}>🔄 MID LINES — tap ▲▼ to reorder</div>
-              {fullMidQueue.map((p, i) => {
-                const isOnField = field.Midfield.includes(p.id);
-                const isSel     = selected?.id === p.id;
-                const lineNum   = Math.floor(i / 2) + 1;
-                const isFirstInLine = i % 2 === 0;
-                const isMidOnly = midOnly.some(m => m.id === p.id);
-                return (
-                  <div key={p.id}>
-                    {isFirstInLine && (
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4, marginTop: i > 0 ? 8 : 0 }}>
-                        <div style={{ flex: 1, height: 1, background: C.border }} />
-                        <span style={{ fontSize: 9, fontWeight: 800, color: isOnField || (fullMidQueue[i+1] && field.Midfield.includes(fullMidQueue[i+1].id)) ? posColor.Midfield : C.muted, letterSpacing: 1 }}>
-                          LINE {lineNum}{lineNum === 1 ? " · ON" : ""}
-                        </span>
-                        <div style={{ flex: 1, height: 1, background: C.border }} />
-                      </div>
-                    )}
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-                      <div style={{ width: 7, height: 7, borderRadius: "50%", background: isOnField ? posColor.Midfield : C.border, flexShrink: 0 }} />
-                      <div style={{ flex: 1, fontSize: 13, fontWeight: 700, color: isOnField ? C.text : C.muted }}>
-                        {p.name}
-                        {isMidOnly && <span style={{ fontSize: 9, color: posColor.Midfield, marginLeft: 5 }}>mid only</span>}
-                      </div>
-                      <span style={{ fontSize: 10, color: C.muted }}>{fmt(p.times.Midfield)}</span>
-                      <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
-                        <button onClick={() => i > 0 && moveMidQueuePlayer(i, i - 1)}
-                          style={{ background: "none", border: "none", color: i > 0 ? C.muted : C.border, cursor: i > 0 ? "pointer" : "default", fontSize: 10, padding: "1px 4px", lineHeight: 1 }}>▲</button>
-                        <button onClick={() => i < fullMidQueue.length - 1 && moveMidQueuePlayer(i, i + 1)}
-                          style={{ background: "none", border: "none", color: i < fullMidQueue.length - 1 ? C.muted : C.border, cursor: i < fullMidQueue.length - 1 ? "pointer" : "default", fontSize: 10, padding: "1px 4px", lineHeight: 1 }}>▼</button>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-
           {/* Defense */}
           <PositionSection pos="Defense" field={field} players={allPlayers} selected={selected} onTapSlot={tapSlot} C={C} />
 
@@ -824,6 +829,47 @@ function App() {
               </div>
             );
           })()}
+
+          {/* Mid Lines — below bench */}
+          {fullMidQueue.length > 0 && (
+            <div style={{ marginTop: 14, background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 12px" }}>
+              <div style={{ fontSize: 10, fontWeight: 800, color: posColor.Midfield, letterSpacing: 1, marginBottom: 8 }}>🔄 MID LINES — tap ▲▼ to reorder</div>
+              {fullMidQueue.map((p, i) => {
+                const isOnField = field.Midfield.includes(p.id);
+                const lineNum = Math.floor(i / 2) + 1;
+                const isFirstInLine = i % 2 === 0;
+                const isMidOnly = midOnly.some(m => m.id === p.id);
+                const lineIsOn = field.Midfield.includes(fullMidQueue[i - (i%2)]?.id) || field.Midfield.includes(fullMidQueue[i - (i%2) + 1]?.id);
+                return (
+                  <div key={p.id}>
+                    {isFirstInLine && (
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4, marginTop: i > 0 ? 8 : 0 }}>
+                        <div style={{ flex: 1, height: 1, background: C.border }} />
+                        <span style={{ fontSize: 9, fontWeight: 800, color: lineIsOn ? posColor.Midfield : C.muted, letterSpacing: 1 }}>
+                          LINE {lineNum}{lineIsOn ? " · ON" : ""}
+                        </span>
+                        <div style={{ flex: 1, height: 1, background: C.border }} />
+                      </div>
+                    )}
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                      <div style={{ width: 7, height: 7, borderRadius: "50%", background: isOnField ? posColor.Midfield : C.border, flexShrink: 0 }} />
+                      <div style={{ flex: 1, fontSize: 13, fontWeight: 700, color: isOnField ? C.text : C.muted }}>
+                        {p.name}
+                        {isMidOnly && <span style={{ fontSize: 9, color: posColor.Midfield, marginLeft: 5 }}>mid only</span>}
+                      </div>
+                      <span style={{ fontSize: 10, color: C.muted }}>{fmt(p.times.Midfield)}</span>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                        <button onClick={() => i > 0 && moveMidQueuePlayer(i, i - 1)}
+                          style={{ background: "none", border: "none", color: i > 0 ? C.muted : C.border, cursor: i > 0 ? "pointer" : "default", fontSize: 10, padding: "1px 4px", lineHeight: 1 }}>▲</button>
+                        <button onClick={() => i < fullMidQueue.length - 1 && moveMidQueuePlayer(i, i + 1)}
+                          style={{ background: "none", border: "none", color: i < fullMidQueue.length - 1 ? C.muted : C.border, cursor: i < fullMidQueue.length - 1 ? "pointer" : "default", fontSize: 10, padding: "1px 4px", lineHeight: 1 }}>▼</button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 
