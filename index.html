@@ -108,38 +108,34 @@ function balancedSplit(poolPlayers, sortByAttackAsc = false) {
 }
 // Distribute Attack/Mid roles across all quarters so each player gets
 // as equal a number of Attack quarters as possible.
-// atkPerQuarter = how many pool kids play Attack each quarter (same as balancedSplit gives)
+// Uses FIELD_SPOTS.Attack as the number of Attack players per quarter.
 function balanceAllQuarters(poolPlayers, numQuarters) {
   const n = poolPlayers.length;
   if (n === 0) return Array(numQuarters).fill([]);
 
-  // Determine how many Attack slots per quarter (same logic as balancedSplit)
-  let midCount = n - 2;
-  if (midCount % 2 !== 0) midCount -= 1;
-  if (midCount < 0) midCount = 0;
-  const atkPerQ = n - midCount;
+  // How many pool kids play Attack per quarter — at least 2, at most n-2
+  const atkPerQ = Math.min(Math.max(FIELD_SPOTS.Attack, 2), Math.max(n - 2, 2));
 
   // Total Attack slots across all quarters
   const totalAtkSlots = atkPerQ * numQuarters;
-  // Base Attack quarters per player, remainder gets +1
   const baseAtk = Math.floor(totalAtkSlots / n);
-  const extras   = totalAtkSlots % n;
+  const extras  = totalAtkSlots % n;
 
-  // Assign each player their Attack quarter count
-  // Shuffle to spread extras evenly — use index as stable ordering
+  // Give each player their Attack quota (some get baseAtk+1)
   const atkQuota = poolPlayers.map((p, i) => ({
     id: p.id,
     quota: baseAtk + (i < extras ? 1 : 0),
     used: 0,
   }));
 
-  // Build each quarter greedily: pick players with most remaining quota
+  // Build each quarter: pick the atkPerQ players with most remaining quota
   const quarters = [];
   for (let q = 0; q < numQuarters; q++) {
-    // Sort by remaining quota desc, then by id for stability
-    const sorted = [...atkQuota].sort((a, b) => (b.quota - b.used) - (a.quota - a.used));
+    const sorted = [...atkQuota].sort((a, b) =>
+      (b.quota - b.used) - (a.quota - a.used) || a.id - b.id
+    );
     const atkIds = sorted.slice(0, atkPerQ).map(x => x.id);
-    atkIds.forEach(id => { const entry = atkQuota.find(x => x.id === id); if (entry) entry.used++; });
+    atkIds.forEach(id => { const e = atkQuota.find(x => x.id === id); if (e) e.used++; });
     quarters.push(poolPlayers.map(p => ({ id: p.id, qRole: atkIds.includes(p.id) ? "Attack" : "Midfield" })));
   }
   return quarters;
@@ -216,9 +212,7 @@ function App() {
   // UI state
   const [activeTab, setActiveTab]   = useState("plan");
   const [selected, setSelected]     = useState(null);
-  const [showQBreak, setShowQBreak] = useState(false);
-  const [editQBreak, setEditQBreak] = useState([]);
-  const [resumeGame, setResumeGame] = useState(() => loadGame()); // saved game to offer resuming
+  const [resumeGame, setResumeGame] = useState(() => loadGame());
 
   // Roster editor
   const [addingTo, setAddingTo] = useState(null);
@@ -422,30 +416,17 @@ function App() {
   }
 
   // ── Quarter break ──────────────────────────────────────────────────────────
-  function openQBreak() {
-    setRunning(false);
+  // ── Quarter advance: load pre-planned assignments for next quarter ────────
+  function advanceQuarter() {
     if (quarter >= NUM_QUARTERS) return;
-    // Suggest next quarter: players with least attack time go to Attack,
-    // keeping Attack >= 2 and Midfield even
-    const suggested = balancedSplit(pool, true);
-    setEditQBreak(suggested);
-    setShowQBreak(true);
-  }
-
-  function confirmQBreak() {
+    setRunning(false);
     const nextQ = quarter + 1;
-    setQAssignments(prev => prev.map((a, i) => i === nextQ - 1 ? editQBreak : a));
-    setField(buildField(
-      pool.map(p => ({ id: p.id, qRole: editQBreak.find(a => a.id === p.id)?.qRole ?? "Midfield" })),
-      midOnly, defense, goalies
-    ));
-    setQuarter(nextQ); setQElapsed(0); setShowQBreak(false); setSelected(null); setMidQueueOrder([]);
-  }
-
-  function toggleQBreakRole(id) {
-    setEditQBreak(prev => prev.map(a =>
-      a.id === id ? { ...a, qRole: a.qRole === "Attack" ? "Midfield" : "Attack" } : a
-    ));
+    const nextAssign = qAssignments[nextQ - 1];
+    setField(buildField(nextAssign, midOnly, defense, goalies));
+    setQuarter(nextQ);
+    setQElapsed(0);
+    setSelected(null);
+    setMidQueueOrder([]);
   }
 
   // ── Roster helpers ─────────────────────────────────────────────────────────
@@ -487,7 +468,7 @@ function App() {
 
   function resetGame() {
     setRunning(false); setQElapsed(0); setQuarter(1); setSelected(null);
-    setShowQBreak(false); setResumeGame(null); clearGame(); setMidQueueOrder([]);
+    setResumeGame(null); clearGame(); setMidQueueOrder([]);
     const r = loadRoster();
     const fp = (r?.pool    ?? DEFAULT_POOL   ).map(p => initPlayer(p, "pool"));
     const fm = (r?.midOnly ?? DEFAULT_MID_ONLY).map(p => initPlayer(p, "midOnly"));
@@ -531,49 +512,6 @@ function App() {
       )}
 
       {/* Quarter-break overlay */}
-      {showQBreak && (
-        <div style={{ position: "fixed", inset: 0, background: "#000c", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
-          <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 16, padding: 20, width: "100%", maxWidth: 400 }}>
-            <div style={{ fontSize: 13, fontWeight: 900, letterSpacing: 2, color: C.accent, marginBottom: 4 }}>Q{quarter + 1} ASSIGNMENTS</div>
-            <div style={{ fontSize: 11, color: C.muted, marginBottom: 16 }}>Suggested based on playing time. Tap to toggle Attack ↔ Mid.</div>
-
-            {/* Show attack time for each player to aid decisions */}
-            {["Attack", "Midfield"].map(role => {
-              const group = editQBreak.filter(a => a.qRole === role);
-              return (
-                <div key={role} style={{ marginBottom: 14 }}>
-                  <div style={{ fontSize: 11, fontWeight: 800, color: posColor[role], letterSpacing: 1, marginBottom: 6 }}>{posEmoji[role]} {role.toUpperCase()} ({group.length})</div>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                    {group.map(a => {
-                      const p = pool.find(x => x.id === a.id);
-                      if (!p) return null;
-                      return (
-                        <button key={a.id} onClick={() => toggleQBreakRole(a.id)}
-                          style={{ padding: "6px 12px", borderRadius: 8, border: `1.5px solid ${posColor[role]}`, background: `${posColor[role]}22`, color: posColor[role], fontWeight: 700, fontSize: 12, cursor: "pointer" }}>
-                          {p.name}
-                          <span style={{ fontSize: 9, marginLeft: 5, opacity: 0.8 }}>Atk {fmt(p.times.Attack)}</span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              );
-            })}
-
-            <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
-              <button onClick={() => setShowQBreak(false)}
-                style={{ flex: 1, background: "transparent", border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, color: C.muted, fontWeight: 700, cursor: "pointer" }}>
-                Cancel
-              </button>
-              <button onClick={confirmQBreak}
-                style={{ flex: 2, background: C.accent, border: "none", borderRadius: 8, padding: 10, color: "#000", fontWeight: 900, cursor: "pointer", fontSize: 14 }}>
-                ▶ Start Q{quarter + 1}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Header */}
       <div style={{ background: themeKey === "dark" ? "linear-gradient(135deg,#0f2040,#0a1628)" : "linear-gradient(135deg,#ffffff,#e8f0f8)", padding: "14px 16px 10px", borderBottom: `1px solid ${C.border}` }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -603,7 +541,7 @@ function App() {
                 {running ? "PAUSE" : "START"}
               </button>
               {quarter < NUM_QUARTERS && (
-                <button onClick={openQBreak}
+                <button onClick={advanceQuarter}
                   style={{ background: "transparent", color: C.muted, border: `1px solid ${C.border}`, borderRadius: 6, padding: "3px 8px", fontWeight: 700, fontSize: 10, cursor: "pointer" }}>
                   END Q{quarter}
                 </button>
@@ -752,6 +690,28 @@ function App() {
       {activeTab === "game" && (
         <div style={{ padding: 16 }}>
 
+          {/* Low playing time banner */}
+          {(() => {
+            const gamePlayers = [...pool, ...midOnly];
+            const times = gamePlayers.map(p => totalTime(p.times));
+            const avg = times.length ? times.reduce((a,b)=>a+b,0) / times.length : 0;
+            if (avg < 30) return null; // don't show until meaningful time has elapsed
+            const lowThreshold = avg * 0.75;
+            const lowPlayers = gamePlayers.filter(p => !p.onField && totalTime(p.times) < lowThreshold);
+            if (lowPlayers.length === 0) return null;
+            return (
+              <div style={{ background: `${C.warn}18`, border: `1px solid ${C.warn}55`, borderRadius: 8, padding: "7px 12px", marginBottom: 10, display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 13 }}>⚠️</span>
+                <div>
+                  <span style={{ fontSize: 10, fontWeight: 800, color: C.warn, letterSpacing: 1 }}>LOW TIME: </span>
+                  <span style={{ fontSize: 11, color: C.warn }}>
+                    {lowPlayers.map(p => `${p.name} (${fmt(totalTime(p.times))})`).join(" · ")}
+                  </span>
+                </div>
+              </div>
+            );
+          })()}
+
           {/* Selection banner */}
           <div style={{ minHeight: 34, marginBottom: 10 }}>
             {selected ? (
@@ -792,6 +752,17 @@ function App() {
           {(() => {
             const benchMidOnly = midOnly.filter(p => !p.onField);
             const allBench = [...benchPool, ...benchMidOnly];
+            // Time flagging: compare each bench player to avg of all pool+midOnly players
+            const gamePlayers = [...pool, ...midOnly];
+            const avgTime = gamePlayers.length ? gamePlayers.reduce((s,p)=>s+totalTime(p.times),0)/gamePlayers.length : 0;
+            const maxBenchTime = Math.max(...allBench.map(p=>totalTime(p.times)), 1);
+            function timeColor(p) {
+              if (avgTime < 30) return C.muted;
+              const t = totalTime(p.times);
+              if (t < avgTime * 0.75) return C.warn;
+              if (t > avgTime * 1.25) return C.muted;
+              return C.accent;
+            }
             return (
               <div style={{ marginTop: 10 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
@@ -805,23 +776,35 @@ function App() {
                   {benchPool.map(p => {
                     const isSel = selected?.id === p.id;
                     const qRole = curAssign.find(a => a.id === p.id)?.qRole;
+                    const tc = timeColor(p);
+                    const tot = totalTime(p.times);
+                    const barW = maxBenchTime > 0 ? (tot / maxBenchTime) * 100 : 0;
                     return (
                       <div key={p.id} onClick={e => { e.stopPropagation(); tapBenchPlayer(p.id); }}
-                        style={{ background: isSel ? `${C.accent}25` : C.card, border: `1.5px solid ${isSel ? C.accent : C.border}`, borderRadius: 8, padding: "6px 10px", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", transform: isSel ? "scale(1.05)" : "scale(1)", boxShadow: isSel ? `0 0 10px ${C.accent}44` : "none", transition: "all 0.15s", minWidth: 60 }}>
+                        style={{ background: isSel ? `${C.accent}25` : C.card, border: `1.5px solid ${isSel ? C.accent : tc === C.warn ? `${C.warn}88` : C.border}`, borderRadius: 8, padding: "6px 10px", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", transform: isSel ? "scale(1.05)" : "scale(1)", boxShadow: isSel ? `0 0 10px ${C.accent}44` : tc === C.warn ? `0 0 6px ${C.warn}44` : "none", transition: "all 0.15s", minWidth: 64 }}>
                         <div style={{ fontSize: 12, fontWeight: 700 }}>{p.name}</div>
                         <div style={{ fontSize: 9, color: qRole ? posColor[qRole] : C.muted, marginTop: 1 }}>{qRole ?? "—"}</div>
-                        <div style={{ fontSize: 9, color: C.muted }}>{fmt(totalTime(p.times))}</div>
+                        <div style={{ fontSize: 9, color: tc, fontWeight: tc === C.warn ? 800 : 400 }}>{fmt(tot)}</div>
+                        <div style={{ marginTop: 3, width: "100%", height: 2, background: C.border, borderRadius: 1, overflow: "hidden" }}>
+                          <div style={{ height: "100%", width: `${barW}%`, background: tc, borderRadius: 1, transition: "width 1s" }} />
+                        </div>
                       </div>
                     );
                   })}
                   {benchMidOnly.map(p => {
                     const isSel = selected?.id === p.id;
+                    const tc = timeColor(p);
+                    const tot = totalTime(p.times);
+                    const barW = maxBenchTime > 0 ? (tot / maxBenchTime) * 100 : 0;
                     return (
                       <div key={p.id} onClick={e => { e.stopPropagation(); tapBenchPlayer(p.id); }}
-                        style={{ background: isSel ? `${posColor.Midfield}25` : C.card, border: `1.5px solid ${isSel ? posColor.Midfield : C.border}`, borderRadius: 8, padding: "6px 10px", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", transform: isSel ? "scale(1.05)" : "scale(1)", boxShadow: isSel ? `0 0 10px ${posColor.Midfield}44` : "none", transition: "all 0.15s", minWidth: 60 }}>
+                        style={{ background: isSel ? `${posColor.Midfield}25` : C.card, border: `1.5px solid ${isSel ? posColor.Midfield : tc === C.warn ? `${C.warn}88` : C.border}`, borderRadius: 8, padding: "6px 10px", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", transform: isSel ? "scale(1.05)" : "scale(1)", boxShadow: isSel ? `0 0 10px ${posColor.Midfield}44` : tc === C.warn ? `0 0 6px ${C.warn}44` : "none", transition: "all 0.15s", minWidth: 64 }}>
                         <div style={{ fontSize: 12, fontWeight: 700 }}>{p.name}</div>
                         <div style={{ fontSize: 9, color: posColor.Midfield, marginTop: 1 }}>Mid Only</div>
-                        <div style={{ fontSize: 9, color: C.muted }}>{fmt(totalTime(p.times))}</div>
+                        <div style={{ fontSize: 9, color: tc, fontWeight: tc === C.warn ? 800 : 400 }}>{fmt(tot)}</div>
+                        <div style={{ marginTop: 3, width: "100%", height: 2, background: C.border, borderRadius: 1, overflow: "hidden" }}>
+                          <div style={{ height: "100%", width: `${barW}%`, background: tc, borderRadius: 1, transition: "width 1s" }} />
+                        </div>
                       </div>
                     );
                   })}
