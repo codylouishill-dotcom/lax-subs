@@ -85,7 +85,25 @@ function buildField(quarterAssignments, defPlayers, gkPlayers) {
   };
 }
 
-// ── Storage helpers ───────────────────────────────────────────────────────────
+// Split pool into Attack/Mid ensuring Attack >= 2 and Midfield is even.
+// Players are sorted by attackTime asc so those with least attack time go to Attack.
+// Optional: pass existing times to sort by; otherwise splits evenly.
+function balancedSplit(poolPlayers, sortByAttackAsc = false) {
+  const n = poolPlayers.length;
+  if (n === 0) return [];
+  // Determine midfield count: even number, leaving at least 2 for attack
+  // Start from largest even number that leaves >= 2 for attack
+  let midCount = n - 2; // max possible mid keeping 2 attack
+  if (midCount % 2 !== 0) midCount -= 1; // make even
+  if (midCount < 0) midCount = 0;
+  const atkCount = n - midCount;
+
+  const ordered = sortByAttackAsc
+    ? [...poolPlayers].sort((a, b) => (a.times?.Attack ?? 0) - (b.times?.Attack ?? 0))
+    : poolPlayers;
+
+  return ordered.map((p, i) => ({ id: p.id, qRole: i < atkCount ? "Attack" : "Midfield" }));
+}
 const ROSTER_KEY   = "lax_roster_v1";
 const GAME_KEY     = "lax_game_v1";
 
@@ -136,7 +154,7 @@ function App() {
   const initDef     = (savedRoster?.defense ?? DEFAULT_DEFENSE).map(p => initPlayer(p, "defense"));
   const initGk      = (savedRoster?.goalies ?? DEFAULT_GOALIE ).map(p => initPlayer(p, "goalie"));
 
-  const defaultBase = initPool.map((p, i) => ({ id: p.id, qRole: i < 4 ? "Attack" : "Midfield" }));
+  const defaultBase = balancedSplit(initPool);
 
   // Roster
   const [pool,    setPool]    = useState(initPool);
@@ -342,15 +360,9 @@ function App() {
   function openQBreak() {
     setRunning(false);
     if (quarter >= NUM_QUARTERS) return;
-    // Suggest next quarter assignments
-    const atkCount = curAssign.filter(a => a.qRole === "Attack").length;
-    const midCount = curAssign.filter(a => a.qRole === "Midfield").length;
-    // Sort pool by Attack time asc → give Attack to those with least Attack time
-    const sorted = [...pool].sort((a, b) => a.times.Attack - b.times.Attack);
-    const suggested = pool.map(p => ({
-      id: p.id,
-      qRole: sorted.slice(0, atkCount).find(s => s.id === p.id) ? "Attack" : "Midfield",
-    }));
+    // Suggest next quarter: players with least attack time go to Attack,
+    // keeping Attack >= 2 and Midfield even
+    const suggested = balancedSplit(pool, true);
     setEditQBreak(suggested);
     setShowQBreak(true);
   }
@@ -383,8 +395,13 @@ function App() {
     const p = initPlayer({ id, name: newName.trim() }, addingTo);
     if (addingTo === "pool") {
       setPool(prev => [...prev, p]);
-      // Add to all quarter assignments as Midfield by default
-      setQAssignments(prev => prev.map(q => [...q, { id, qRole: "Midfield" }]));
+      // Add to all quarter assignments — default Midfield, but rebalance so mid stays even
+      setQAssignments(prev => prev.map(q => {
+        const midCount = q.filter(a => a.qRole === "Midfield").length;
+        // If adding to mid would make it odd, add to Attack instead
+        const qRole = midCount % 2 === 0 ? "Midfield" : "Attack";
+        return [...q, { id, qRole }];
+      }));
     }
     if (addingTo === "defense") setDefense(prev => [...prev, p]);
     if (addingTo === "goalie")  setGoalies(prev => [...prev, p]);
@@ -423,7 +440,7 @@ function App() {
     const freshDef  = (loadRoster()?.defense ?? DEFAULT_DEFENSE).map(p => initPlayer(p, "defense"));
     const freshGk   = (loadRoster()?.goalies ?? DEFAULT_GOALIE ).map(p => initPlayer(p, "goalie"));
     setPool(freshPool); setDefense(freshDef); setGoalies(freshGk);
-    const base = freshPool.map((p, i) => ({ id: p.id, qRole: i < 4 ? "Attack" : "Midfield" }));
+    const base = balancedSplit(fp);
     setQAssignments([base, base, base, base]);
     setField(buildField(base, freshDef, freshGk));
   }
