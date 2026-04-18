@@ -381,11 +381,14 @@ function App() {
     if (!newName.trim() || !addingTo) return;
     const id = Date.now();
     const p = initPlayer({ id, name: newName.trim() }, addingTo);
-    if (addingTo === "pool")    setPool(prev => [...prev, p]);
+    if (addingTo === "pool") {
+      setPool(prev => [...prev, p]);
+      // Add to all quarter assignments as Midfield by default
+      setQAssignments(prev => prev.map(q => [...q, { id, qRole: "Midfield" }]));
+    }
     if (addingTo === "defense") setDefense(prev => [...prev, p]);
     if (addingTo === "goalie")  setGoalies(prev => [...prev, p]);
     setNewName("");
-    // Refocus input for next entry
     setTimeout(() => document.querySelector("#addPlayerInput")?.focus(), 50);
   }
 
