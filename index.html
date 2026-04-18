@@ -218,6 +218,7 @@ const [field, setField] = useState(() => buildField(defaultBaseQ1, initMidOnly, 
 const [activeTab, setActiveTab]   = useState(“plan”);
 const [selected, setSelected]     = useState(null);
 const [resumeGame, setResumeGame] = useState(() => loadGame());
+const [manualFieldEdit, setManualFieldEdit] = useState(false);
 
 // Roster editor
 const [addingTo, setAddingTo] = useState(null);
@@ -426,10 +427,6 @@ setSelected(null);
 }
 
 // ── Quarter break ──────────────────────────────────────────────────────────
-// Track whether the user has manually edited the field (so we don’t
-// clobber their pre-game swaps when the roster auto-rebuilds)
-const [manualFieldEdit, setManualFieldEdit] = useState(false);
-
 // ── Rebuild field when roster/assignments change and game hasn’t started ────
 useEffect(() => {
 if (running || qElapsed > 0 || manualFieldEdit) return;
