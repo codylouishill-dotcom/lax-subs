@@ -421,7 +421,14 @@ function App() {
   }
 
   // ── Quarter break ──────────────────────────────────────────────────────────
-  // ── Quarter advance: load pre-planned assignments for next quarter ────────
+  // ── Rebuild field when roster/assignments change and game hasn't started ────
+  // This ensures adding/removing players in the Plan tab is immediately
+  // reflected in the Game tab starting lineup.
+  useEffect(() => {
+    if (running || qElapsed > 0) return; // don't clobber a live game
+    const curAssignForQ = qAssignments[quarter - 1] ?? [];
+    setField(buildField(curAssignForQ, midOnly, defense, goalies));
+  }, [qAssignments, midOnly, defense, goalies, pool]);
   function advanceQuarter() {
     if (quarter >= NUM_QUARTERS) return;
     setRunning(false);
