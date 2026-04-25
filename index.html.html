@@ -1,0 +1,1374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Lax Subs" />
+  <meta name="theme-color" content="#0a1628" />
+  <title>Lax Sub Manager</title>
+  <style>
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    body { margin: 0; padding: 0; background: #0a1628; overscroll-behavior: none; }
+    input, button, select { font-family: inherit; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef } = React;
+
+
+// ── Constants ────────────────────────────────────────────────────────────────
+const NUM_QUARTERS = 4;
+const FIELD_SPOTS = { Attack: 2, Midfield: 2, Defense: 2, Goalie: 1 };
+
+const THEMES = {
+  dark: {
+    bg: "#0a1628", surface: "#0f2040", card: "#162848", border: "#1e3a5f",
+    accent: "#00c896", warn: "#f5a623", red: "#e8445a", text: "#e8f4f8", muted: "#6b8fa8",
+  },
+  light: {
+    bg: "#f0f4f8", surface: "#ffffff", card: "#ffffff", border: "#d0dce8",
+    accent: "#009970", warn: "#c47c00", red: "#c0303f", text: "#0f2030", muted: "#5a7a90",
+  },
+};
+
+const posColor  = { Attack: "#e8445a", Midfield: "#f5a623", Defense: "#4a9eff", Goalie: "#b06aff" };
+const posEmoji  = { Attack: "⚔️", Midfield: "🔄", Defense: "🛡️", Goalie: "🥅" };
+
+// ── Default roster ───────────────────────────────────────────────────────────
+const DEFAULT_POOL     = [
+  { id: 1, name: "Geddy" }, { id: 2, name: "Rylan" }, { id: 3, name: "Lincoln" },
+  { id: 4, name: "Brant" }, { id: 5, name: "Asher" }, { id: 6, name: "Jax" },
+];
+const DEFAULT_MID_ONLY = [
+  { id: 7, name: "Detmer" }, { id: 8, name: "Nolan" }, { id: 9, name: "Jace" },
+  { id: 10, name: "Kimball" }, { id: 11, name: "Kaiden" },
+];
+const DEFAULT_DEFENSE  = [{ id: 12, name: "Kai" }, { id: 13, name: "Scott" }];
+const DEFAULT_GOALIE   = [{ id: 14, name: "Ziggy" }];
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+function fmt(s) {
+  return `${Math.floor(s / 60).toString().padStart(2, "0")}:${(s % 60).toString().padStart(2, "0")}`;
+}
+
+function emptyTimes() { return { Attack: 0, Midfield: 0, Defense: 0, Goalie: 0 }; }
+function totalTime(t)  { return Object.values(t).reduce((a, b) => a + b, 0); }
+
+function initPlayer(p, role) {
+  return { ...p, role, canPlayDefense: p.canPlayDefense ?? false, times: emptyTimes(), onField: false, currentPos: null };
+}
+
+// Given pool players and how many attack spots, suggest a balanced split
+// minimising difference in Attack time across players
+function suggestSplit(poolPlayers, atkSpots, midSpots) {
+  const sorted = [...poolPlayers].sort((a, b) => a.times.Attack - b.times.Attack);
+  // Players with least attack time go to Attack this quarter
+  const atkIds = sorted.slice(0, atkSpots + 1).map(p => p.id); // +1 so bench has someone
+  return poolPlayers.map(p => ({ ...p, qRole: atkIds.includes(p.id) ? "Attack" : "Midfield" }));
+}
+
+// Build field slots for a quarter from quarter assignments + midOnly players
+function buildField(quarterAssignments, midOnlyPlayers, defPlayers, gkPlayers) {
+  const atkIds    = quarterAssignments.filter(p => p.qRole === "Attack").map(p => p.id);
+  const midFromPool = quarterAssignments.filter(p => p.qRole === "Midfield").map(p => p.id);
+  // Mid queue: midOnly first, then pool kids assigned to mid this quarter
+  const midQueue  = [...midOnlyPlayers.map(p => p.id), ...midFromPool];
+  return {
+    Attack:   atkIds.slice(0, FIELD_SPOTS.Attack),
+    Midfield: midQueue.slice(0, FIELD_SPOTS.Midfield),
+    Defense:  defPlayers.slice(0, FIELD_SPOTS.Defense).map(p => p.id),
+    Goalie:   gkPlayers.slice(0, FIELD_SPOTS.Goalie).map(p => p.id),
+  };
+}
+
+const MAX_ATTACK = 4; // max pool kids in Attack per quarter
+
+// Compute how many pool kids go to Mid per quarter such that:
+// - total midfielders (midOnly + midFromPool) is even
+// - attack count is between 2 and MAX_ATTACK
+function midFromPoolCount(n, midOnlyCount = 0) {
+  if (n <= 0) return 0;
+  // Start from the minimum attack (2), try up to MAX_ATTACK
+  // and pick the largest valid midFromPool that makes total mid even
+  let bestMid = 0;
+  for (let atk = 2; atk <= Math.min(MAX_ATTACK, n); atk++) {
+    const mid = n - atk;
+    const totalMid = mid + midOnlyCount;
+    if (totalMid % 2 === 0) {
+      bestMid = mid; // keep largest valid mid count (smallest valid attack)
+    }
+  }
+  // Fallback: if no even total found, use largest mid with attack=2
+  if (bestMid === 0) {
+    bestMid = n - 2;
+    if (bestMid < 0) bestMid = 0;
+  }
+  return bestMid;
+}
+
+// Single-quarter balanced split (used for display/fallback)
+function balancedSplit(poolPlayers, midOnlyCount = 0, sortByAttackAsc = false) {
+  const n = poolPlayers.length;
+  if (n === 0) return [];
+  const midCount = midFromPoolCount(n, midOnlyCount);
+  const atkCount = n - midCount;
+  const ordered = sortByAttackAsc
+    ? [...poolPlayers].sort((a, b) => (a.times?.Attack ?? 0) - (b.times?.Attack ?? 0))
+    : poolPlayers;
+  return ordered.map((p, i) => ({ id: p.id, qRole: i < atkCount ? "Attack" : "Midfield" }));
+}
+
+// Distribute Attack/Mid across all quarters so each player gets as equal
+// Attack-quarter count as possible. Total midfielders (midOnly+pool) is even each quarter.
+function balanceAllQuarters(poolPlayers, numQuarters, midOnlyCount = 0) {
+  const n = poolPlayers.length;
+  if (n === 0) return Array.from({ length: numQuarters }, () => []);
+
+  const midPerQ = midFromPoolCount(n, midOnlyCount); // keeps total mid even
+  const atkPerQ = n - midPerQ;                        // 2–4 players in Attack
+
+  // Total Attack slots across all quarters
+  const totalAtkSlots = atkPerQ * numQuarters;
+  const baseAtk = Math.floor(totalAtkSlots / n);
+  const extras  = totalAtkSlots % n;
+
+  // Give each player an Attack quota
+  const quota = poolPlayers.map((p, i) => ({
+    id: p.id,
+    quota: baseAtk + (i < extras ? 1 : 0),
+    used: 0,
+  }));
+
+  // Build each quarter: pick atkPerQ players with most remaining quota
+  return Array.from({ length: numQuarters }, () => {
+    const sorted = [...quota].sort((a, b) =>
+      (b.quota - b.used) - (a.quota - a.used) || a.id - b.id
+    );
+    const atkIds = sorted.slice(0, atkPerQ).map(x => x.id);
+    atkIds.forEach(id => { const e = quota.find(x => x.id === id); if (e) e.used++; });
+    return poolPlayers.map(p => ({ id: p.id, qRole: atkIds.includes(p.id) ? "Attack" : "Midfield" }));
+  });
+}
+const GAME_KEY     = "lax_game_v1";
+
+function saveRoster(pool, midOnly, defense, goalies) {
+  try {
+    localStorage.setItem(ROSTER_KEY, JSON.stringify({
+      pool:    pool.map(p    => ({ id: p.id, name: p.name, canPlayDefense: p.canPlayDefense ?? false })),
+      midOnly: midOnly.map(p => ({ id: p.id, name: p.name, canPlayDefense: p.canPlayDefense ?? false })),
+      defense: defense.map(p => ({ id: p.id, name: p.name, canPlayMid: p.canPlayMid ?? false })),
+      goalies: goalies.map(p => ({ id: p.id, name: p.name })),
+    }));
+  } catch(e) {}
+}
+
+function loadRoster() {
+  try {
+    const raw = localStorage.getItem(ROSTER_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch(e) { return null; }
+}
+
+function saveGame(state) {
+  try { localStorage.setItem(GAME_KEY, JSON.stringify({ ...state, savedAt: Date.now() })); }
+  catch(e) {}
+}
+
+function loadGame() {
+  try {
+    const raw = localStorage.getItem(GAME_KEY);
+    if (!raw) return null;
+    const g = JSON.parse(raw);
+    // Discard saves older than 6 hours
+    if (Date.now() - g.savedAt > 6 * 60 * 60 * 1000) { localStorage.removeItem(GAME_KEY); return null; }
+    return g;
+  } catch(e) { return null; }
+}
+
+function clearGame() { try { localStorage.removeItem(GAME_KEY); } catch(e) {} }
+
+const SEASON_KEY = "lax_season_v1";
+function loadSeason() {
+  try { const r = localStorage.getItem(SEASON_KEY); return r ? JSON.parse(r) : []; }
+  catch(e) { return []; }
+}
+function saveSeason(games) {
+  try { localStorage.setItem(SEASON_KEY, JSON.stringify(games)); } catch(e) {}
+}
+
+// ── App ──────────────────────────────────────────────────────────────────────
+function App() {
+  const [themeKey, setThemeKey] = useState("dark");
+  const C = THEMES[themeKey];
+
+  // On first render, check for saved roster + saved game
+  const savedRoster = loadRoster();
+  const initPool    = (savedRoster?.pool    ?? DEFAULT_POOL   ).map(p => initPlayer(p, "pool"));
+  const initMidOnly = (savedRoster?.midOnly ?? DEFAULT_MID_ONLY).map(p => initPlayer(p, "midOnly"));
+  const initDef     = (savedRoster?.defense ?? DEFAULT_DEFENSE).map(p => initPlayer(p, "defense"));
+  const initGk      = (savedRoster?.goalies ?? DEFAULT_GOALIE ).map(p => initPlayer(p, "goalie"));
+
+  const defaultBase     = balanceAllQuarters(initPool, NUM_QUARTERS, initMidOnly.length);
+  const defaultBaseQ1   = defaultBase[0] ?? [];
+
+  // Roster
+  const [pool,    setPool]    = useState(initPool);
+  const [midOnly, setMidOnly] = useState(initMidOnly);
+  const [defense, setDefense] = useState(initDef);
+  const [goalies, setGoalies] = useState(initGk);
+
+  // Quarter state
+  const [quarter, setQuarter]   = useState(1);
+  const [running, setRunning]   = useState(false);
+  const [qElapsed, setQElapsed] = useState(0);
+
+  const [qAssignments, setQAssignments] = useState(() => defaultBase);
+
+  const [field, setField] = useState(() => buildField(defaultBaseQ1, initMidOnly, initDef, initGk));
+
+  // UI state
+  const [activeTab, setActiveTab]   = useState("plan");
+  const [selected, setSelected]     = useState(null);
+  const [resumeGame, setResumeGame] = useState(() => loadGame());
+  const [manualFieldEdit, setManualFieldEdit] = useState(false);
+  const [seasonGames, setSeasonGames] = useState(() => loadSeason());
+  const [showEndGame, setShowEndGame] = useState(false);
+  const [gameLabel, setGameLabel]     = useState("");
+
+  // Roster editor
+  const [addingTo, setAddingTo] = useState(null);
+  const [newName, setNewName]   = useState("");
+  // Mid queue order overrides — array of player ids in desired order (rebuilt each quarter)
+  const [midQueueOrder, setMidQueueOrder] = useState([]);
+  // Stack of snapshots for undo — each entry saves full state before quarter advance
+  const [quarterHistory, setQuarterHistory] = useState([]);
+
+  const intervalRef = useRef(null);
+
+  // ── Timer ──────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (running) {
+      intervalRef.current = setInterval(() => {
+        setQElapsed(e => e + 1);
+        // Tick time for all on-field players
+        const onFieldIds = Object.values(field).flat();
+        setPool(prev => prev.map(p => {
+          if (!p.onField || !p.currentPos) return p;
+          return { ...p, times: { ...p.times, [p.currentPos]: p.times[p.currentPos] + 1 } };
+        }));
+        setMidOnly(prev => prev.map(p => {
+          if (!p.onField) return p;
+          return { ...p, times: { ...p.times, Midfield: p.times.Midfield + 1 } };
+        }));
+        setDefense(prev => prev.map(p => {
+          if (!p.onField) return p;
+          return { ...p, times: { ...p.times, Defense: p.times.Defense + 1 } };
+        }));
+        setGoalies(prev => prev.map(p => {
+          if (!p.onField) return p;
+          return { ...p, times: { ...p.times, Goalie: p.times.Goalie + 1 } };
+        }));
+      }, 1000);
+    } else {
+      clearInterval(intervalRef.current);
+    }
+    return () => clearInterval(intervalRef.current);
+  }, [running, field]);
+
+  // ── Persist roster whenever it changes ────────────────────────────────────
+  useEffect(() => { saveRoster(pool, midOnly, defense, goalies); }, [pool, midOnly, defense, goalies]);
+
+  // ── Save game state whenever anything important changes ────────────────────
+  useEffect(() => {
+    // Always save so a refresh can resume — skip only if no game has started
+    if (quarter === 1 && qElapsed === 0) return;
+    saveGame({ pool, midOnly, defense, goalies, quarter, qElapsed, qAssignments, field, midQueueOrder });
+  }, [pool, midOnly, defense, goalies, quarter, qElapsed, qAssignments, field, midQueueOrder]);
+
+  // ── Warn before leaving while game is running ──────────────────────────────
+  useEffect(() => {
+    const handler = (e) => {
+      if (!running) return;
+      e.preventDefault();
+      e.returnValue = "Game in progress — are you sure you want to leave?";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [running]);
+
+  useEffect(() => {
+    const onFieldMap = {};
+    for (const [pos, ids] of Object.entries(field)) ids.forEach(id => { onFieldMap[id] = pos; });
+    const sync = (players) => players.map(p => ({
+      ...p, onField: !!onFieldMap[p.id], currentPos: onFieldMap[p.id] ?? null,
+    }));
+    setPool(sync); setMidOnly(sync); setDefense(sync); setGoalies(sync);
+  }, [field]);
+
+  const allPlayers = [...pool, ...midOnly, ...defense, ...goalies];
+  const maxTime    = Math.max(...allPlayers.map(p => totalTime(p.times)), 1);
+
+  // ── Current quarter's pool assignments ────────────────────────────────────
+  const curAssign = qAssignments[quarter - 1];
+  const atkPool   = pool.filter(p => curAssign.find(a => a.id === p.id && a.qRole === "Attack"));
+  const midPool   = pool.filter(p => curAssign.find(a => a.id === p.id && a.qRole === "Midfield"));
+  // Full mid queue: midOnly first, then pool kids assigned to mid this quarter,
+  // then any defenders with canPlayMid who aren't currently in a Defense slot
+  const flexDefenders = defense.filter(p => p.canPlayMid && !field.Defense.includes(p.id));
+  const defaultMidQueue = [...midOnly, ...midPool, ...flexDefenders];
+  const fullMidQueue = midQueueOrder.length > 0
+    ? [...midQueueOrder.map(id => defaultMidQueue.find(p => p.id === id)).filter(Boolean),
+       ...defaultMidQueue.filter(p => !midQueueOrder.includes(p.id))]
+    : defaultMidQueue;
+
+  function moveMidQueuePlayer(fromIdx, toIdx) {
+    const ids = fullMidQueue.map(p => p.id);
+    const [moved] = ids.splice(fromIdx, 1);
+    ids.splice(toIdx, 0, moved);
+    setMidQueueOrder(ids);
+  }
+
+  // ── Swap logic ─────────────────────────────────────────────────────────────
+  function swapPlayers(aId, targetPos, targetSlotIdx) {
+    setField(prev => {
+      const slots = {};
+      for (const pos of Object.keys(FIELD_SPOTS))
+        slots[pos] = Array.from({ length: FIELD_SPOTS[pos] }, (_, i) => prev[pos]?.[i] ?? null);
+
+      if (targetPos === "bench") {
+        for (const pos of Object.keys(slots)) slots[pos] = slots[pos].map(x => x === aId ? null : x);
+      } else {
+        const occupant = slots[targetPos][targetSlotIdx];
+        let aPos = null, aIdx = -1;
+        for (const pos of Object.keys(slots)) {
+          const i = slots[pos].indexOf(aId);
+          if (i !== -1) { aPos = pos; aIdx = i; break; }
+        }
+        if (occupant && occupant !== aId) {
+          if (aPos !== null) slots[aPos][aIdx] = occupant;
+        } else if (aPos !== null) {
+          slots[aPos][aIdx] = null;
+        }
+        // Clear aId from all slots, then place
+        for (const pos of Object.keys(slots)) slots[pos] = slots[pos].map(x => x === aId ? null : x);
+        slots[targetPos][targetSlotIdx] = aId;
+      }
+      const next = {};
+      for (const pos of Object.keys(slots)) next[pos] = slots[pos].filter(x => x !== null);
+      return next;
+    });
+    setSelected(null);
+    setManualFieldEdit(true);
+  }
+  function rotateAttack() {
+    const onField   = field.Attack.filter(Boolean);
+    const benchAtk  = atkPool.filter(p => !onField.includes(p.id));
+    if (benchAtk.length === 0) return;
+    const nextIn    = benchAtk[0].id;
+    const outPlayer = [...onField]
+      .sort((a, b) => (allPlayers.find(p => p.id === b)?.times.Attack ?? 0) - (allPlayers.find(p => p.id === a)?.times.Attack ?? 0))[0];
+    if (!outPlayer) return;
+    const slotIdx = field.Attack.indexOf(outPlayer);
+    swapPlayers(nextIn, "Attack", slotIdx);
+  }
+
+  // ── Rotate Mid: full pair swap using fullMidQueue (midOnly + pool mid kids) ─
+  function rotateMid() {
+    const onFieldIds = field.Midfield.filter(Boolean);
+    const benchMid   = fullMidQueue.filter(p => !onFieldIds.includes(p.id));
+    if (benchMid.length === 0) return;
+    const swapCount = Math.min(benchMid.length, FIELD_SPOTS.Midfield);
+    const incoming  = benchMid.slice(0, swapCount).map(p => p.id);
+    const outgoing  = [...onFieldIds]
+      .sort((a, b) => (allPlayers.find(p => p.id === b)?.times.Midfield ?? 0) - (allPlayers.find(p => p.id === a)?.times.Midfield ?? 0))
+      .slice(0, swapCount);
+
+    setField(prev => {
+      const slots = {};
+      for (const pos of Object.keys(FIELD_SPOTS))
+        slots[pos] = Array.from({ length: FIELD_SPOTS[pos] }, (_, i) => prev[pos]?.[i] ?? null);
+      outgoing.forEach((outId, i) => {
+        const slotIdx = slots.Midfield.indexOf(outId);
+        if (slotIdx !== -1) slots.Midfield[slotIdx] = incoming[i];
+      });
+      const next = {};
+      for (const pos of Object.keys(slots)) next[pos] = slots[pos].filter(x => x !== null);
+      return next;
+    });
+
+    // Cycle outgoing players to the back of the queue so the next line comes up
+    setMidQueueOrder(() => {
+      const currentOrder = fullMidQueue.map(p => p.id);
+      const remaining = currentOrder.filter(id => !outgoing.includes(id));
+      return [...remaining, ...outgoing];
+    });
+
+    setSelected(null);
+  }
+
+  // ── Tap-to-swap handlers ───────────────────────────────────────────────────
+  function tapSlot(pos, slotIdx) {
+    const pid = field[pos]?.[slotIdx] ?? null;
+    if (!selected) {
+      if (pid) setSelected({ id: pid, pos, slotIdx });
+    } else if (selected.id === pid) {
+      setSelected(null);
+    } else {
+      swapPlayers(selected.id, pos, slotIdx);
+    }
+  }
+
+  function tapBenchPlayer(pid) {
+    if (!selected) {
+      setSelected({ id: pid });
+    } else if (selected.id === pid) {
+      setSelected(null);
+    } else if (selected.pos) {
+      // A field player is selected — put bench player into that slot,
+      // swapPlayers handles sending the field player to bench atomically
+      swapPlayers(pid, selected.pos, selected.slotIdx);
+    } else {
+      // Both are bench players — just switch selection
+      setSelected({ id: pid });
+    }
+  }
+
+  function tapBenchZone() {
+    if (selected?.pos) { swapPlayers(selected.id, "bench", -1); }
+    setSelected(null);
+  }
+
+  // ── Quarter break ──────────────────────────────────────────────────────────
+  // ── Rebuild field when roster/assignments change and game hasn't started ────
+  useEffect(() => {
+    if (running || qElapsed > 0 || manualFieldEdit) return;
+    const curAssignForQ = qAssignments[quarter - 1] ?? [];
+    setField(buildField(curAssignForQ, midOnly, defense, goalies));
+  }, [qAssignments, midOnly, defense, goalies, pool]);
+  function advanceQuarter() {
+    if (quarter >= NUM_QUARTERS) return;
+    setRunning(false);
+    // Save full snapshot before advancing so we can undo
+    setQuarterHistory(prev => [...prev, {
+      quarter, qElapsed, field,
+      pool: pool.map(p => ({ ...p })),
+      midOnly: midOnly.map(p => ({ ...p })),
+      defense: defense.map(p => ({ ...p })),
+      goalies: goalies.map(p => ({ ...p })),
+      midQueueOrder: [...midQueueOrder],
+    }]);
+    const nextQ = quarter + 1;
+    setField(buildField(qAssignments[nextQ - 1], midOnly, defense, goalies));
+    setQuarter(nextQ);
+    setQElapsed(0);
+    setSelected(null);
+    setMidQueueOrder([]);
+    setManualFieldEdit(false);
+  }
+
+  function undoQuarter() {
+    if (quarterHistory.length === 0) return;
+    setRunning(false);
+    const prev = quarterHistory[quarterHistory.length - 1];
+    setQuarter(prev.quarter);
+    setQElapsed(prev.qElapsed);
+    setField(prev.field);
+    setPool(prev.pool);
+    setMidOnly(prev.midOnly);
+    setDefense(prev.defense);
+    setGoalies(prev.goalies);
+    setMidQueueOrder(prev.midQueueOrder);
+    setSelected(null);
+    setManualFieldEdit(true); // don't auto-rebuild field
+    setQuarterHistory(h => h.slice(0, -1));
+  }
+  function addPlayer() {
+    if (!newName.trim() || !addingTo) return;
+    const id = Date.now();
+    const p = initPlayer({ id, name: newName.trim() }, addingTo);
+    if (addingTo === "pool") {
+      setPool(prev => [...prev, p]);
+      setQAssignments(prev => prev.map(q => {
+        const midCount = q.filter(a => a.qRole === "Midfield").length;
+        const qRole = midCount % 2 === 0 ? "Midfield" : "Attack";
+        return [...q, { id, qRole }];
+      }));
+    }
+    if (addingTo === "midOnly") setMidOnly(prev => [...prev, p]);
+    if (addingTo === "defense") setDefense(prev => [...prev, p]);
+    if (addingTo === "goalie")  setGoalies(prev => [...prev, p]);
+    setNewName("");
+    setTimeout(() => document.querySelector("#addPlayerInput")?.focus(), 50);
+  }
+
+  function removePlayer(id) {
+    setPool(prev => prev.filter(p => p.id !== id));
+    setMidOnly(prev => prev.filter(p => p.id !== id));
+    setDefense(prev => prev.filter(p => p.id !== id));
+    setGoalies(prev => prev.filter(p => p.id !== id));
+    setField(prev => { const n = {}; for (const pos of Object.keys(prev)) n[pos] = prev[pos].filter(x => x !== id); return n; });
+    setQAssignments(prev => prev.map(q => q.filter(a => a.id !== id)));
+  }
+
+  function toggleCanPlayDefense(id) {
+    setPool(prev => prev.map(p => p.id === id ? { ...p, canPlayDefense: !p.canPlayDefense } : p));
+    setMidOnly(prev => prev.map(p => p.id === id ? { ...p, canPlayDefense: !p.canPlayDefense } : p));
+  }
+
+  function toggleCanPlayMid(id) {
+    setDefense(prev => prev.map(p => p.id === id ? { ...p, canPlayMid: !p.canPlayMid } : p));
+  }
+
+  function restoreGame(saved) {
+    setPool(saved.pool); setMidOnly(saved.midOnly ?? []); setDefense(saved.defense); setGoalies(saved.goalies);
+    setQuarter(saved.quarter); setQElapsed(saved.qElapsed);
+    setQAssignments(saved.qAssignments); setField(saved.field);
+    setMidQueueOrder(saved.midQueueOrder ?? []);
+    setResumeGame(null); setActiveTab("game");
+  }
+
+  function endGame() {
+    if (!gameLabel.trim()) return;
+    const date = new Date().toLocaleDateString();
+    const allP = [...pool, ...midOnly, ...defense, ...goalies];
+    const gameRecord = {
+      id: Date.now(),
+      label: gameLabel.trim(),
+      date,
+      players: allP.map(p => ({
+        id: p.id, name: p.name, role: p.role,
+        total: totalTime(p.times),
+        attack: p.times.Attack,
+        mid: p.times.Midfield,
+        defense: p.times.Defense,
+        goalie: p.times.Goalie,
+      })),
+    };
+    const updated = [...seasonGames, gameRecord];
+    setSeasonGames(updated);
+    saveSeason(updated);
+    setShowEndGame(false);
+    setGameLabel("");
+    // Reset game state but keep roster
+    setRunning(false); setQElapsed(0); setQuarter(1); setSelected(null);
+    clearGame(); setMidQueueOrder([]); setManualFieldEdit(false);
+    setQuarterHistory([]);
+    const fp = pool.map(p => initPlayer({ id: p.id, name: p.name, canPlayDefense: p.canPlayDefense }, "pool"));
+    const fm = midOnly.map(p => initPlayer({ id: p.id, name: p.name, canPlayDefense: p.canPlayDefense }, "midOnly"));
+    const fd = defense.map(p => initPlayer({ id: p.id, name: p.name, canPlayMid: p.canPlayMid }, "defense"));
+    const fg = goalies.map(p => initPlayer({ id: p.id, name: p.name }, "goalie"));
+    setPool(fp); setMidOnly(fm); setDefense(fd); setGoalies(fg);
+    const base = balanceAllQuarters(fp, NUM_QUARTERS, fm.length);
+    setQAssignments(base);
+    setField(buildField(base[0], fm, fd, fg));
+    setActiveTab("season");
+  }
+
+  function exportCSV() {
+    if (seasonGames.length === 0) return;
+    // Build all player names across all games
+    const allNames = new Set();
+    seasonGames.forEach(g => g.players.forEach(p => allNames.add(p.name)));
+    const names = [...allNames].sort();
+
+    const headers = ["Player", "Role", ...seasonGames.map(g => `${g.label} (${g.date}) Total`), ...seasonGames.map(g => `${g.label} Attack`), ...seasonGames.map(g => `${g.label} Mid`), "Season Total", "Season Attack", "Season Mid"];
+
+    const rows = names.map(name => {
+      const gameTotals = seasonGames.map(g => {
+        const p = g.players.find(x => x.name === name);
+        return p ? Math.round(p.total / 60 * 10) / 10 : 0;
+      });
+      const gameAtk = seasonGames.map(g => { const p = g.players.find(x => x.name === name); return p ? Math.round(p.attack / 60 * 10) / 10 : 0; });
+      const gameMid = seasonGames.map(g => { const p = g.players.find(x => x.name === name); return p ? Math.round(p.mid / 60 * 10) / 10 : 0; });
+      const role = seasonGames[seasonGames.length - 1]?.players.find(x => x.name === name)?.role ?? "";
+      const seasonTotal = gameTotals.reduce((a, b) => a + b, 0).toFixed(1);
+      const seasonAtk   = gameAtk.reduce((a, b) => a + b, 0).toFixed(1);
+      const seasonMid   = gameMid.reduce((a, b) => a + b, 0).toFixed(1);
+      return [name, role, ...gameTotals, ...gameAtk, ...gameMid, seasonTotal, seasonAtk, seasonMid];
+    });
+
+    const csv = [headers, ...rows].map(r => r.join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement("a");
+    a.href = url; a.download = "lacrosse_season_stats.csv";
+    a.click(); URL.revokeObjectURL(url);
+  }
+
+  function resetGame() {
+    setRunning(false); setQElapsed(0); setQuarter(1); setSelected(null);
+    setResumeGame(null); clearGame(); setMidQueueOrder([]); setManualFieldEdit(false);
+    setQuarterHistory([]);
+    const r = loadRoster();
+    const fp = (r?.pool    ?? DEFAULT_POOL   ).map(p => initPlayer(p, "pool"));
+    const fm = (r?.midOnly ?? DEFAULT_MID_ONLY).map(p => initPlayer(p, "midOnly"));
+    const fd = (r?.defense ?? DEFAULT_DEFENSE).map(p => initPlayer(p, "defense"));
+    const fg = (r?.goalies ?? DEFAULT_GOALIE ).map(p => initPlayer(p, "goalie"));
+    setPool(fp); setMidOnly(fm); setDefense(fd); setGoalies(fg);
+    const base = balanceAllQuarters(fp, NUM_QUARTERS, fm.length);
+    setQAssignments(base);
+    setField(buildField(base[0], fm, fd, fg));
+  }
+
+  const selPlayer = selected ? allPlayers.find(p => p.id === selected.id) : null;
+  const benchPool = pool.filter(p => !p.onField);
+
+  // ── Render ─────────────────────────────────────────────────────────────────
+  return (
+    <div style={{ fontFamily: "'Trebuchet MS', sans-serif", background: C.bg, minHeight: "100vh", color: C.text, maxWidth: 480, margin: "0 auto", paddingBottom: 80 }}>
+
+      {/* Resume game prompt */}
+      {resumeGame && (
+        <div style={{ position: "fixed", inset: 0, background: "#000c", zIndex: 300, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+          <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 16, padding: 20, width: "100%", maxWidth: 360 }}>
+            <div style={{ fontSize: 22, marginBottom: 8, textAlign: "center" }}>🏃</div>
+            <div style={{ fontSize: 14, fontWeight: 900, color: C.text, marginBottom: 6, textAlign: "center" }}>Resume game in progress?</div>
+            <div style={{ fontSize: 12, color: C.muted, marginBottom: 16, textAlign: "center" }}>
+              Q{resumeGame.quarter} · {fmt(resumeGame.qElapsed)} elapsed<br/>
+              Saved {Math.round((Date.now() - resumeGame.savedAt) / 60000)} min ago
+            </div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button onClick={() => { setResumeGame(null); clearGame(); }}
+                style={{ flex: 1, background: "transparent", border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, color: C.muted, fontWeight: 700, cursor: "pointer", fontSize: 13 }}>
+                New Game
+              </button>
+              <button onClick={() => restoreGame(resumeGame)}
+                style={{ flex: 2, background: C.accent, border: "none", borderRadius: 8, padding: 10, color: "#000", fontWeight: 900, cursor: "pointer", fontSize: 14 }}>
+                ▶ Resume
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Quarter-break overlay */}
+
+      {/* End Game modal */}
+      {showEndGame && (
+        <div style={{ position: "fixed", inset: 0, background: "#000c", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+          <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 16, padding: 20, width: "100%", maxWidth: 360 }}>
+            <div style={{ fontSize: 13, fontWeight: 900, color: C.accent, letterSpacing: 1, marginBottom: 4 }}>END GAME</div>
+            <div style={{ fontSize: 11, color: C.muted, marginBottom: 14 }}>Save this game's stats to your season record.</div>
+            <input value={gameLabel} onChange={e => setGameLabel(e.target.value)}
+              placeholder="e.g. Game 1 vs Eagles"
+              style={{ width: "100%", background: C.surface, border: `1px solid ${C.border}`, borderRadius: 8, padding: "10px 12px", color: C.text, fontSize: 14, outline: "none", marginBottom: 14, boxSizing: "border-box" }} />
+            {/* Quick preview of game stats */}
+            <div style={{ fontSize: 11, color: C.muted, marginBottom: 8 }}>
+              {[...pool, ...midOnly, ...defense, ...goalies]
+                .filter(p => totalTime(p.times) > 0)
+                .sort((a,b) => totalTime(b.times) - totalTime(a.times))
+                .slice(0, 5)
+                .map(p => `${p.name} ${fmt(totalTime(p.times))}`).join("  ·  ")}
+              {[...pool, ...midOnly, ...defense, ...goalies].filter(p => totalTime(p.times) > 0).length > 5 ? " ···" : ""}
+            </div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button onClick={() => { setShowEndGame(false); setGameLabel(""); }}
+                style={{ flex: 1, background: "transparent", border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, color: C.muted, fontWeight: 700, cursor: "pointer" }}>
+                Cancel
+              </button>
+              <button onClick={endGame} disabled={!gameLabel.trim()}
+                style={{ flex: 2, background: gameLabel.trim() ? C.accent : C.border, border: "none", borderRadius: 8, padding: 10, color: "#000", fontWeight: 900, cursor: gameLabel.trim() ? "pointer" : "default", fontSize: 14 }}>
+                Save & Reset
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Header */}
+      <div style={{ background: themeKey === "dark" ? "linear-gradient(135deg,#0f2040,#0a1628)" : "linear-gradient(135deg,#ffffff,#e8f0f8)", padding: "14px 16px 10px", borderBottom: `1px solid ${C.border}` }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div>
+            <div style={{ fontSize: 10, letterSpacing: 3, color: C.accent, fontWeight: 700 }}>7v7 LACROSSE</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div style={{ fontSize: 19, fontWeight: 900 }}>Sub Manager</div>
+              <button onClick={() => setThemeKey(k => k === "dark" ? "light" : "dark")}
+                style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 20, padding: "2px 7px", fontSize: 13, cursor: "pointer", color: C.muted }}>
+                {themeKey === "dark" ? "☀️" : "🌙"}
+              </button>
+            </div>
+          </div>
+          <div style={{ textAlign: "right" }}>
+            {/* Quarter pips */}
+            <div style={{ display: "flex", gap: 4, justifyContent: "flex-end", marginBottom: 4 }}>
+              {Array.from({ length: NUM_QUARTERS }).map((_, i) => (
+                <div key={i} style={{ width: 22, height: 22, borderRadius: 6, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 800, background: i + 1 < quarter ? C.accent : i + 1 === quarter ? `${C.accent}44` : C.border, border: i + 1 === quarter ? `1.5px solid ${C.accent}` : "1.5px solid transparent", color: i + 1 < quarter ? "#000" : i + 1 === quarter ? C.accent : C.muted }}>
+                  Q{i + 1}
+                </div>
+              ))}
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, justifyContent: "flex-end" }}>
+              <div style={{ fontSize: 22, fontWeight: 900, fontVariantNumeric: "tabular-nums", color: running ? C.accent : C.muted }}>{fmt(qElapsed)}</div>
+              <button onClick={() => setRunning(r => !r)}
+                style={{ background: running ? C.warn : C.accent, color: "#000", border: "none", borderRadius: 6, padding: "3px 10px", fontWeight: 800, fontSize: 11, cursor: "pointer" }}>
+                {running ? "PAUSE" : "START"}
+              </button>
+              {quarter < NUM_QUARTERS && (
+                <button onClick={advanceQuarter}
+                  style={{ background: "transparent", color: C.muted, border: `1px solid ${C.border}`, borderRadius: 6, padding: "3px 8px", fontWeight: 700, fontSize: 10, cursor: "pointer" }}>
+                  END Q{quarter}
+                </button>
+              )}
+              {quarterHistory.length > 0 && (
+                <button onClick={undoQuarter}
+                  style={{ background: `${C.warn}18`, color: C.warn, border: `1px solid ${C.warn}55`, borderRadius: 6, padding: "3px 8px", fontWeight: 700, fontSize: 10, cursor: "pointer" }}>
+                  ↩ Q{quarter - 1}
+                </button>
+              )}
+              <button onClick={resetGame}
+                style={{ background: "transparent", color: C.muted, border: `1px solid ${C.border}`, borderRadius: 6, padding: "3px 8px", fontWeight: 700, fontSize: 10, cursor: "pointer" }}>↺</button>
+              <button onClick={() => { setGameLabel(`Game ${seasonGames.length + 1}`); setShowEndGame(true); setRunning(false); }}
+                style={{ background: `${C.accent}18`, color: C.accent, border: `1px solid ${C.accent}55`, borderRadius: 6, padding: "3px 8px", fontWeight: 700, fontSize: 10, cursor: "pointer" }}>
+                ✓ End Game
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div style={{ display: "flex", borderBottom: `1px solid ${C.border}`, background: C.surface }}>
+        {[["plan", "📋 Plan"], ["game", "⚔️ Game"], ["stats", "📊 Stats"], ["season", "🏆 Season"]].map(([tab, label]) => (
+          <button key={tab} onClick={() => { setActiveTab(tab); setSelected(null); }}
+            style={{ flex: 1, padding: "9px 0", background: "none", border: "none", borderBottom: activeTab === tab ? `2px solid ${C.accent}` : "2px solid transparent", color: activeTab === tab ? C.accent : C.muted, fontWeight: 700, fontSize: 11, cursor: "pointer" }}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {/* ══ PLAN TAB ══ */}
+      {activeTab === "plan" && (
+        <div style={{ padding: 16 }}>
+          <div style={{ fontSize: 11, color: C.muted, letterSpacing: 1, marginBottom: 16 }}>PRE-GAME · ASSIGN PLAYERS TO GROUPS</div>
+
+          {/* Quarter assignment grid */}
+          <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 14, marginBottom: 20 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+              <span style={{ fontSize: 11, fontWeight: 800, color: C.muted, letterSpacing: 1 }}>QUARTER ASSIGNMENTS — ATTACK/MID POOL</span>
+              <button onClick={() => {
+                const balanced = balanceAllQuarters(pool, NUM_QUARTERS, midOnly.length);
+                setQAssignments(balanced);
+              }}
+                style={{ background: `${C.accent}18`, border: `1px solid ${C.accent}55`, borderRadius: 6, color: C.accent, padding: "3px 10px", fontSize: 10, fontWeight: 800, cursor: "pointer" }}>
+                ⚖ Auto-Balance
+              </button>
+            </div>
+            {Array.from({ length: NUM_QUARTERS }).map((_, qi) => {
+              const qa = qAssignments[qi];
+              const atkGroup = pool.filter(p => qa.find(a => a.id === p.id && a.qRole === "Attack"));
+              const midGroup = pool.filter(p => qa.find(a => a.id === p.id && a.qRole === "Midfield"));
+              const isCurrent = qi + 1 === quarter;
+              return (
+                <div key={qi} style={{ marginBottom: qi < 3 ? 12 : 0, padding: "8px 10px", borderRadius: 8, background: isCurrent ? `${C.accent}12` : "transparent", border: `1px solid ${isCurrent ? C.accent : "transparent"}` }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                    <span style={{ fontSize: 11, fontWeight: 800, color: isCurrent ? C.accent : C.muted }}>Q{qi + 1}</span>
+                    {isCurrent && <span style={{ fontSize: 9, background: `${C.accent}22`, color: C.accent, padding: "1px 6px", borderRadius: 4, fontWeight: 700 }}>CURRENT</span>}
+                  </div>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    {[["Attack", atkGroup], ["Midfield", midGroup]].map(([role, group]) => (
+                      <div key={role} style={{ flex: 1 }}>
+                        <div style={{ fontSize: 9, color: posColor[role], fontWeight: 800, marginBottom: 4 }}>{posEmoji[role]} {role.toUpperCase()}</div>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 3 }}>
+                          {group.map(p => (
+                            <button key={p.id} onClick={() => {
+                              setQAssignments(prev => prev.map((q, i) => i !== qi ? q :
+                                q.map(a => a.id === p.id ? { ...a, qRole: role === "Attack" ? "Midfield" : "Attack" } : a)
+                              ));
+                            }}
+                              style={{ padding: "3px 8px", borderRadius: 5, border: `1px solid ${posColor[role]}55`, background: `${posColor[role]}18`, color: posColor[role], fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+                              {p.name}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Mid-Only */}
+          <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 14, marginBottom: 14 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+              <span style={{ fontSize: 11, fontWeight: 800, color: C.muted, letterSpacing: 1 }}>{posEmoji.Midfield} MID ONLY ({midOnly.length})</span>
+              <button onClick={() => setAddingTo("midOnly")} style={{ background: "transparent", border: `1px solid ${C.border}`, borderRadius: 6, color: posColor.Midfield, padding: "2px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>+ Add</button>
+            </div>
+            {midOnly.map(p => (
+              <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5, padding: "5px 8px", background: C.surface, borderRadius: 8 }}>
+                <div style={{ flex: 1, fontWeight: 700, fontSize: 13 }}>{p.name}</div>
+                <button onClick={() => toggleCanPlayDefense(p.id)}
+                  title="Can play defense"
+                  style={{ padding: "2px 7px", borderRadius: 5, border: `1px solid ${p.canPlayDefense ? posColor.Defense : C.border}`, background: p.canPlayDefense ? `${posColor.Defense}22` : "transparent", color: p.canPlayDefense ? posColor.Defense : C.muted, fontSize: 10, fontWeight: 700, cursor: "pointer" }}>
+                  🛡️
+                </button>
+                <button onClick={() => removePlayer(p.id)} style={{ background: "none", border: "none", color: C.red, cursor: "pointer", fontSize: 13 }}>✕</button>
+              </div>
+            ))}
+          </div>
+
+          {/* Defense */}
+          <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 14, marginBottom: 14 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+              <span style={{ fontSize: 11, fontWeight: 800, color: C.muted, letterSpacing: 1 }}>{posEmoji.Defense} DEFENSE ({defense.length})</span>
+              <button onClick={() => setAddingTo("defense")} style={{ background: "transparent", border: `1px solid ${C.border}`, borderRadius: 6, color: posColor.Defense, padding: "2px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>+ Add</button>
+            </div>
+            {defense.map(p => (
+              <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5, padding: "5px 8px", background: C.surface, borderRadius: 8 }}>
+                <div style={{ flex: 1, fontWeight: 700, fontSize: 13 }}>{p.name}</div>
+                <button onClick={() => toggleCanPlayMid(p.id)}
+                  title="Can play midfield"
+                  style={{ padding: "2px 7px", borderRadius: 5, border: `1px solid ${p.canPlayMid ? posColor.Midfield : C.border}`, background: p.canPlayMid ? `${posColor.Midfield}22` : "transparent", color: p.canPlayMid ? posColor.Midfield : C.muted, fontSize: 10, fontWeight: 700, cursor: "pointer" }}>
+                  🔄
+                </button>
+                <button onClick={() => removePlayer(p.id)} style={{ background: "none", border: "none", color: C.red, cursor: "pointer", fontSize: 13 }}>✕</button>
+              </div>
+            ))}
+          </div>
+
+          {/* Goalie */}
+          <RosterGroup title="GOALIE" color={posColor.Goalie} emoji={posEmoji.Goalie} players={goalies}
+            onRemove={removePlayer} onAdd={() => setAddingTo("goalie")} C={C} />
+
+          {/* Add player modal */}
+          {addingTo && (
+            <div style={{ position: "fixed", inset: 0, background: "#000b", zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+              <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, width: "100%", maxWidth: 340 }}>
+                <div style={{ fontSize: 12, fontWeight: 800, color: C.muted, letterSpacing: 1, marginBottom: 12 }}>
+                  ADD TO {addingTo === "midOnly" ? "MID ONLY" : addingTo.toUpperCase()}
+                </div>
+                <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+                  <input id="addPlayerInput" value={newName} onChange={e => setNewName(e.target.value)}
+                    onKeyDown={e => e.key === "Enter" && addPlayer()}
+                    placeholder="Player name" autoFocus
+                    style={{ flex: 1, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 8, padding: "10px 12px", color: C.text, fontSize: 15, outline: "none" }} />
+                  <button onClick={addPlayer}
+                    style={{ background: C.accent, border: "none", borderRadius: 8, padding: "10px 14px", color: "#000", fontWeight: 900, cursor: "pointer", fontSize: 14 }}>
+                    + Add
+                  </button>
+                </div>
+                {/* Show recently added players */}
+                {(() => {
+                  const list = addingTo === "pool" ? pool : addingTo === "midOnly" ? midOnly : addingTo === "defense" ? defense : goalies;
+                  return list.length > 0 ? (
+                    <div style={{ marginBottom: 12 }}>
+                      <div style={{ fontSize: 10, color: C.muted, letterSpacing: 1, marginBottom: 6 }}>ADDED</div>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+                        {list.map(p => (
+                          <span key={p.id} style={{ fontSize: 12, fontWeight: 700, background: `${C.accent}18`, color: C.accent, padding: "3px 10px", borderRadius: 6 }}>
+                            {p.name}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null;
+                })()}
+                <button onClick={() => { setAddingTo(null); setNewName(""); }}
+                  style={{ width: "100%", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, color: C.muted, fontWeight: 700, cursor: "pointer" }}>
+                  Done
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Pool */}
+          <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 14, marginBottom: 14 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+              <span style={{ fontSize: 11, fontWeight: 800, color: C.muted, letterSpacing: 1 }}>⚔️🔄 ATTACK/MID POOL ({pool.length})</span>
+              <button onClick={() => setAddingTo("pool")} style={{ background: "transparent", border: `1px solid ${C.border}`, borderRadius: 6, color: C.accent, padding: "2px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>+ Add</button>
+            </div>
+            {pool.map(p => (
+              <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, padding: "6px 8px", background: C.surface, borderRadius: 8 }}>
+                <div style={{ flex: 1, fontWeight: 700, fontSize: 13 }}>{p.name}</div>
+                <span style={{ fontSize: 10, color: posColor.Attack }}>Atk {fmt(p.times.Attack)}</span>
+                <span style={{ fontSize: 10, color: posColor.Midfield }}>Mid {fmt(p.times.Midfield)}</span>
+                <button onClick={() => toggleCanPlayDefense(p.id)}
+                  title="Can play defense"
+                  style={{ padding: "2px 7px", borderRadius: 5, border: `1px solid ${p.canPlayDefense ? posColor.Defense : C.border}`, background: p.canPlayDefense ? `${posColor.Defense}22` : "transparent", color: p.canPlayDefense ? posColor.Defense : C.muted, fontSize: 10, fontWeight: 700, cursor: "pointer" }}>
+                  🛡️
+                </button>
+                <button onClick={() => removePlayer(p.id)} style={{ background: "none", border: "none", color: C.red, cursor: "pointer", fontSize: 13 }}>✕</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ══ GAME TAB ══ */}
+      {activeTab === "game" && (
+        <div style={{ padding: 16 }}>
+
+          {/* Low playing time banner */}
+          {(() => {
+            const gamePlayers = [...pool, ...midOnly];
+            const times = gamePlayers.map(p => totalTime(p.times));
+            const avg = times.length ? times.reduce((a,b)=>a+b,0) / times.length : 0;
+            if (avg < 30) return null; // don't show until meaningful time has elapsed
+            const lowThreshold = avg * 0.75;
+            const lowPlayers = gamePlayers.filter(p => !p.onField && totalTime(p.times) < lowThreshold);
+            if (lowPlayers.length === 0) return null;
+            return (
+              <div style={{ background: `${C.warn}18`, border: `1px solid ${C.warn}55`, borderRadius: 8, padding: "7px 12px", marginBottom: 10, display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 13 }}>⚠️</span>
+                <div>
+                  <span style={{ fontSize: 10, fontWeight: 800, color: C.warn, letterSpacing: 1 }}>LOW TIME: </span>
+                  <span style={{ fontSize: 11, color: C.warn }}>
+                    {lowPlayers.map(p => `${p.name} (${fmt(totalTime(p.times))})`).join(" · ")}
+                  </span>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Selection banner */}
+          <div style={{ minHeight: 34, marginBottom: 10 }}>
+            {selected ? (
+              <div style={{ background: `${C.accent}18`, border: `1px solid ${C.accent}55`, borderRadius: 8, padding: "7px 12px", fontSize: 13, color: C.accent, fontWeight: 700, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span>✓ <b>{selPlayer?.name}</b> — tap a slot to swap</span>
+                <button onClick={() => setSelected(null)} style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 16 }}>✕</button>
+              </div>
+            ) : (
+              <div style={{ fontSize: 10, color: C.muted, letterSpacing: 1, paddingTop: 6 }}>TAP TO SELECT · TAP SLOT TO SWAP</div>
+            )}
+          </div>
+
+          {/* Attack */}
+          <PositionSection
+            pos="Attack" field={field} players={allPlayers} selected={selected}
+            onTapSlot={tapSlot} C={C}
+            rotateLabel="⟳ ROTATE (1)"
+            onRotate={atkPool.filter(p => !field.Attack.includes(p.id)).length > 0 ? rotateAttack : null}
+            nextLabel={(() => { const b = atkPool.filter(p => !field.Attack.includes(p.id)); return b[0]?.name ?? ""; })()}
+          />
+
+          {/* Midfield */}
+          <PositionSection
+            pos="Midfield" field={field} players={allPlayers} selected={selected}
+            onTapSlot={tapSlot} C={C}
+            rotateLabel={`⟳ ROTATE (${Math.min(fullMidQueue.filter(p => !field.Midfield.includes(p.id)).length, 2)})`}
+            onRotate={fullMidQueue.filter(p => !field.Midfield.includes(p.id)).length > 0 ? rotateMid : null}
+            nextLabel={(() => { const b = fullMidQueue.filter(p => !field.Midfield.includes(p.id)); return b.slice(0, 2).map(p => p.name).join(", "); })()}
+          />
+
+          {/* Defense */}
+          <PositionSection pos="Defense" field={field} players={allPlayers} selected={selected} onTapSlot={tapSlot} C={C} />
+
+          {/* Goalie */}
+          <PositionSection pos="Goalie" field={field} players={allPlayers} selected={selected} onTapSlot={tapSlot} C={C} />
+
+          {/* Bench */}
+          {(() => {
+            const benchMidOnly  = midOnly.filter(p => !p.onField);
+            const benchDefense  = defense.filter(p => !p.onField);
+            const benchGoalies  = goalies.filter(p => !p.onField);
+            const allBench = [...benchPool, ...benchMidOnly, ...benchDefense, ...benchGoalies];
+            // Time flagging: compare each bench player to avg of all pool+midOnly players
+            const gamePlayers = [...pool, ...midOnly];
+            const avgTime = gamePlayers.length ? gamePlayers.reduce((s,p)=>s+totalTime(p.times),0)/gamePlayers.length : 0;
+            const maxBenchTime = Math.max(...allBench.map(p=>totalTime(p.times)), 1);
+            function timeColor(p) {
+              if (avgTime < 30) return C.muted;
+              const t = totalTime(p.times);
+              if (t < avgTime * 0.75) return C.warn;
+              if (t > avgTime * 1.25) return C.muted;
+              return C.accent;
+            }
+            return (
+              <div style={{ marginTop: 10 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                  <div style={{ width: 7, height: 7, borderRadius: "50%", background: C.muted }} />
+                  <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: 2, color: C.muted }}>BENCH ({allBench.length})</span>
+                  <div style={{ flex: 1, height: 1, background: C.border }} />
+                </div>
+                <div onClick={tapBenchZone}
+                  style={{ minHeight: 56, borderRadius: 10, padding: 8, border: `2px dashed ${selected?.pos ? C.muted : C.border}`, background: selected?.pos ? `${C.muted}12` : "transparent", display: "flex", flexWrap: "wrap", gap: 7, transition: "all 0.15s" }}>
+                  {allBench.length === 0 && <div style={{ fontSize: 12, color: C.border, padding: "8px 4px" }}>All players on field</div>}
+                  {benchPool.map(p => {
+                    const isSel = selected?.id === p.id;
+                    const qRole = curAssign.find(a => a.id === p.id)?.qRole;
+                    const tc = timeColor(p);
+                    const tot = totalTime(p.times);
+                    const barW = maxBenchTime > 0 ? (tot / maxBenchTime) * 100 : 0;
+                    return (
+                      <div key={p.id} onClick={e => { e.stopPropagation(); tapBenchPlayer(p.id); }}
+                        style={{ background: isSel ? `${C.accent}25` : C.card, border: `1.5px solid ${isSel ? C.accent : tc === C.warn ? `${C.warn}88` : C.border}`, borderRadius: 8, padding: "6px 10px", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", transform: isSel ? "scale(1.05)" : "scale(1)", boxShadow: isSel ? `0 0 10px ${C.accent}44` : tc === C.warn ? `0 0 6px ${C.warn}44` : "none", transition: "all 0.15s", minWidth: 64 }}>
+                        <div style={{ fontSize: 12, fontWeight: 700 }}>{p.name}</div>
+                        <div style={{ fontSize: 9, color: qRole ? posColor[qRole] : C.muted, marginTop: 1 }}>{qRole ?? "—"}</div>
+                        <div style={{ fontSize: 9, color: tc, fontWeight: tc === C.warn ? 800 : 400 }}>{fmt(tot)}</div>
+                        <div style={{ marginTop: 3, width: "100%", height: 2, background: C.border, borderRadius: 1, overflow: "hidden" }}>
+                          <div style={{ height: "100%", width: `${barW}%`, background: tc, borderRadius: 1, transition: "width 1s" }} />
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {benchMidOnly.map(p => {
+                    const isSel = selected?.id === p.id;
+                    const tc = timeColor(p);
+                    const tot = totalTime(p.times);
+                    const barW = maxBenchTime > 0 ? (tot / maxBenchTime) * 100 : 0;
+                    return (
+                      <div key={p.id} onClick={e => { e.stopPropagation(); tapBenchPlayer(p.id); }}
+                        style={{ background: isSel ? `${posColor.Midfield}25` : C.card, border: `1.5px solid ${isSel ? posColor.Midfield : tc === C.warn ? `${C.warn}88` : C.border}`, borderRadius: 8, padding: "6px 10px", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", transform: isSel ? "scale(1.05)" : "scale(1)", boxShadow: isSel ? `0 0 10px ${posColor.Midfield}44` : tc === C.warn ? `0 0 6px ${C.warn}44` : "none", transition: "all 0.15s", minWidth: 64 }}>
+                        <div style={{ fontSize: 12, fontWeight: 700 }}>{p.name}</div>
+                        <div style={{ fontSize: 9, color: posColor.Midfield, marginTop: 1 }}>Mid Only</div>
+                        <div style={{ fontSize: 9, color: tc, fontWeight: tc === C.warn ? 800 : 400 }}>{fmt(tot)}</div>
+                        <div style={{ marginTop: 3, width: "100%", height: 2, background: C.border, borderRadius: 1, overflow: "hidden" }}>
+                          <div style={{ height: "100%", width: `${barW}%`, background: tc, borderRadius: 1, transition: "width 1s" }} />
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {[...benchDefense, ...benchGoalies].map(p => {
+                    const isSel = selected?.id === p.id;
+                    const role  = benchDefense.includes(p) ? "Defense" : "Goalie";
+                    const tot   = totalTime(p.times);
+                    const barW  = maxBenchTime > 0 ? (tot / maxBenchTime) * 100 : 0;
+                    return (
+                      <div key={p.id} onClick={e => { e.stopPropagation(); tapBenchPlayer(p.id); }}
+                        style={{ background: isSel ? `${posColor[role]}25` : C.card, border: `1.5px solid ${isSel ? posColor[role] : C.border}`, borderRadius: 8, padding: "6px 10px", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", transform: isSel ? "scale(1.05)" : "scale(1)", boxShadow: isSel ? `0 0 10px ${posColor[role]}44` : "none", transition: "all 0.15s", minWidth: 64 }}>
+                        <div style={{ fontSize: 12, fontWeight: 700 }}>{p.name}</div>
+                        <div style={{ fontSize: 9, color: posColor[role], marginTop: 1 }}>{role}</div>
+                        <div style={{ fontSize: 9, color: C.muted }}>{fmt(tot)}</div>
+                        <div style={{ marginTop: 3, width: "100%", height: 2, background: C.border, borderRadius: 1, overflow: "hidden" }}>
+                          <div style={{ height: "100%", width: `${barW}%`, background: posColor[role], opacity: 0.6, borderRadius: 1, transition: "width 1s" }} />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Mid Lines — below bench */}
+          {fullMidQueue.length > 0 && (
+            <div style={{ marginTop: 14, background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 12px" }}>
+              <div style={{ fontSize: 10, fontWeight: 800, color: posColor.Midfield, letterSpacing: 1, marginBottom: 8 }}>🔄 MID LINES — tap ▲▼ to reorder</div>
+              {(() => {
+                // Filter out: flex mid players in defense, AND flex defenders in defense
+                const visibleQueue = fullMidQueue.filter(p =>
+                  !(p.canPlayDefense && field.Defense.includes(p.id)) &&
+                  !(p.canPlayMid && field.Defense.includes(p.id))
+                );
+                return visibleQueue.map((p, i) => {
+                  const isOnField = field.Midfield.includes(p.id);
+                  const lineNum = Math.floor(i / 2) + 1;
+                  const isFirstInLine = i % 2 === 0;
+                  const isMidOnly = midOnly.some(m => m.id === p.id);
+                  const lineIsOn = field.Midfield.includes(visibleQueue[i - (i%2)]?.id) || field.Midfield.includes(visibleQueue[i - (i%2) + 1]?.id);
+                  // Use original index in fullMidQueue for reorder buttons
+                  const origIdx = fullMidQueue.indexOf(p);
+                  return (
+                    <div key={p.id}>
+                      {isFirstInLine && (
+                        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4, marginTop: i > 0 ? 8 : 0 }}>
+                          <div style={{ flex: 1, height: 1, background: C.border }} />
+                          <span style={{ fontSize: 9, fontWeight: 800, color: lineIsOn ? posColor.Midfield : C.muted, letterSpacing: 1 }}>
+                            LINE {lineNum}{lineIsOn ? " · ON" : ""}
+                          </span>
+                          <div style={{ flex: 1, height: 1, background: C.border }} />
+                        </div>
+                      )}
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                        <div style={{ width: 7, height: 7, borderRadius: "50%", background: isOnField ? posColor.Midfield : C.border, flexShrink: 0 }} />
+                        <div style={{ flex: 1, fontSize: 13, fontWeight: 700, color: isOnField ? C.text : C.muted }}>
+                          {p.name}
+                          {isMidOnly && <span style={{ fontSize: 9, color: posColor.Midfield, marginLeft: 5 }}>mid only</span>}
+                          {p.canPlayDefense && <span style={{ fontSize: 9, color: posColor.Defense, marginLeft: 5 }}>🛡️</span>}
+                          {p.canPlayMid && <span style={{ fontSize: 9, color: posColor.Defense, marginLeft: 5 }}>🛡️</span>}
+                        </div>
+                        <span style={{ fontSize: 10, color: C.muted }}>{fmt(p.times.Midfield)}</span>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                          <button onClick={() => origIdx > 0 && moveMidQueuePlayer(origIdx, origIdx - 1)}
+                            style={{ background: "none", border: "none", color: origIdx > 0 ? C.muted : C.border, cursor: origIdx > 0 ? "pointer" : "default", fontSize: 10, padding: "1px 4px", lineHeight: 1 }}>▲</button>
+                          <button onClick={() => origIdx < fullMidQueue.length - 1 && moveMidQueuePlayer(origIdx, origIdx + 1)}
+                            style={{ background: "none", border: "none", color: origIdx < fullMidQueue.length - 1 ? C.muted : C.border, cursor: origIdx < fullMidQueue.length - 1 ? "pointer" : "default", fontSize: 10, padding: "1px 4px", lineHeight: 1 }}>▼</button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                });
+              })()}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ══ STATS TAB ══ */}
+      {activeTab === "stats" && (
+        <div style={{ padding: 16 }}>
+          <div style={{ fontSize: 11, color: C.muted, letterSpacing: 1, marginBottom: 14 }}>PLAYING TIME THIS GAME</div>
+
+          {/* Attack/Mid Pool */}
+          <div style={{ marginBottom: 20 }}>
+            <div style={{ fontSize: 11, fontWeight: 800, color: C.muted, letterSpacing: 1, marginBottom: 10 }}>⚔️🔄 ATTACK / MID POOL</div>
+            {[...pool].sort((a, b) => totalTime(b.times) - totalTime(a.times)).map(p => {
+              const tot  = totalTime(p.times);
+              const atk  = p.times.Attack;
+              const mid  = p.times.Midfield;
+              const atkW = tot > 0 ? (atk / tot) * 100 : 0;
+              const midW = tot > 0 ? (mid / tot) * 100 : 0;
+              return (
+                <div key={p.id} style={{ background: C.card, borderRadius: 10, padding: "10px 12px", marginBottom: 8, border: `1px solid ${C.border}` }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                      <div style={{ width: 7, height: 7, borderRadius: "50%", background: p.onField ? C.accent : C.muted }} />
+                      <span style={{ fontWeight: 800, fontSize: 14 }}>{p.name}</span>
+                      {p.onField && <span style={{ fontSize: 9, color: posColor[p.currentPos], fontWeight: 700 }}>{p.currentPos}</span>}
+                    </div>
+                    <span style={{ fontSize: 13, fontWeight: 800, color: C.accent }}>{fmt(tot)}</span>
+                  </div>
+                  <div style={{ height: 6, background: C.border, borderRadius: 3, overflow: "hidden", display: "flex" }}>
+                    <div style={{ width: `${atkW}%`, background: posColor.Attack, transition: "width 1s" }} />
+                    <div style={{ width: `${midW}%`, background: posColor.Midfield, transition: "width 1s" }} />
+                  </div>
+                  <div style={{ display: "flex", gap: 12, marginTop: 4 }}>
+                    <span style={{ fontSize: 10, color: posColor.Attack }}>⚔️ {fmt(atk)}</span>
+                    <span style={{ fontSize: 10, color: posColor.Midfield }}>🔄 {fmt(mid)}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Mid Only */}
+          {midOnly.length > 0 && (
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ fontSize: 11, fontWeight: 800, color: C.muted, letterSpacing: 1, marginBottom: 10 }}>🔄 MID ONLY</div>
+              {[...midOnly].sort((a, b) => totalTime(b.times) - totalTime(a.times)).map(p => {
+                const tot = totalTime(p.times);
+                return (
+                  <div key={p.id} style={{ background: C.card, borderRadius: 10, padding: "10px 12px", marginBottom: 8, border: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                      <div style={{ width: 7, height: 7, borderRadius: "50%", background: p.onField ? posColor.Midfield : C.muted }} />
+                      <span style={{ fontWeight: 700, fontSize: 14 }}>{p.name}</span>
+                      {p.onField && <span style={{ fontSize: 9, color: posColor.Midfield, fontWeight: 700 }}>Mid</span>}
+                    </div>
+                    <span style={{ fontSize: 13, fontWeight: 800, color: C.accent }}>{fmt(tot)}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Defense + Goalie */}
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 800, color: C.muted, letterSpacing: 1, marginBottom: 10 }}>🛡️🥅 DEFENSE / GOALIE</div>
+            {[...defense, ...goalies].sort((a, b) => totalTime(b.times) - totalTime(a.times)).map(p => {
+              const tot = totalTime(p.times);
+              return (
+                <div key={p.id} style={{ background: C.card, borderRadius: 10, padding: "10px 12px", marginBottom: 8, border: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                    <div style={{ width: 7, height: 7, borderRadius: "50%", background: p.onField ? C.accent : C.muted }} />
+                    <span style={{ fontWeight: 700, fontSize: 14 }}>{p.name}</span>
+                    {p.onField && <span style={{ fontSize: 9, color: posColor[p.currentPos ?? "Defense"], fontWeight: 700 }}>{p.currentPos}</span>}
+                  </div>
+                  <span style={{ fontSize: 13, fontWeight: 800, color: C.accent }}>{fmt(tot)}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* ══ SEASON TAB ══ */}
+      {activeTab === "season" && (
+        <div style={{ padding: 16 }}>
+
+          {/* Header row */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+            <div style={{ fontSize: 11, color: C.muted, letterSpacing: 1 }}>
+              {seasonGames.length} GAME{seasonGames.length !== 1 ? "S" : ""} RECORDED
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              {seasonGames.length > 0 && (
+                <button onClick={exportCSV}
+                  style={{ background: `${C.accent}18`, border: `1px solid ${C.accent}55`, borderRadius: 6, color: C.accent, padding: "4px 12px", fontSize: 11, fontWeight: 800, cursor: "pointer" }}>
+                  ↓ Export CSV
+                </button>
+              )}
+              {seasonGames.length > 0 && (
+                <button onClick={() => { if (window.confirm("Clear all season data?")) { setSeasonGames([]); localStorage.removeItem("lax_season_v1"); } }}
+                  style={{ background: "transparent", border: `1px solid ${C.border}`, borderRadius: 6, color: C.red, padding: "4px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+                  Clear
+                </button>
+              )}
+            </div>
+          </div>
+
+          {seasonGames.length === 0 && (
+            <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 24, textAlign: "center" }}>
+              <div style={{ fontSize: 28, marginBottom: 8 }}>🏆</div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: C.muted, marginBottom: 6 }}>No games recorded yet</div>
+              <div style={{ fontSize: 12, color: C.border }}>Tap "✓ End Game" after a game to save stats here</div>
+            </div>
+          )}
+
+          {/* Season totals per player */}
+          {seasonGames.length > 0 && (() => {
+            // Aggregate across all games
+            const playerMap = {};
+            seasonGames.forEach(g => {
+              g.players.forEach(p => {
+                if (!playerMap[p.name]) playerMap[p.name] = { name: p.name, role: p.role, total: 0, attack: 0, mid: 0, games: 0 };
+                playerMap[p.name].total  += p.total;
+                playerMap[p.name].attack += p.attack;
+                playerMap[p.name].mid    += p.mid;
+                if (p.total > 0) playerMap[p.name].games++;
+              });
+            });
+            const players = Object.values(playerMap).sort((a,b) => b.total - a.total);
+            const maxTotal = Math.max(...players.map(p => p.total), 1);
+            return (
+              <div style={{ marginBottom: 20 }}>
+                <div style={{ fontSize: 11, fontWeight: 800, color: C.muted, letterSpacing: 1, marginBottom: 10 }}>SEASON TOTALS</div>
+                {players.map(p => {
+                  const atkW = p.total > 0 ? (p.attack / p.total) * 100 : 0;
+                  const midW = p.total > 0 ? (p.mid / p.total) * 100 : 0;
+                  return (
+                    <div key={p.name} style={{ background: C.card, borderRadius: 10, padding: "10px 12px", marginBottom: 8, border: `1px solid ${C.border}` }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <span style={{ fontWeight: 800, fontSize: 14 }}>{p.name}</span>
+                          <span style={{ fontSize: 9, color: C.muted }}>{p.games}G</span>
+                        </div>
+                        <span style={{ fontSize: 13, fontWeight: 800, color: C.accent }}>{fmt(p.total)}</span>
+                      </div>
+                      <div style={{ height: 6, background: C.border, borderRadius: 3, overflow: "hidden", display: "flex" }}>
+                        <div style={{ width: `${(p.total / maxTotal) * 100}%`, background: C.border, borderRadius: 3, overflow: "hidden", display: "flex", height: "100%" }}>
+                          <div style={{ width: `${atkW}%`, background: posColor.Attack }} />
+                          <div style={{ width: `${midW}%`, background: posColor.Midfield }} />
+                          <div style={{ flex: 1, background: posColor.Defense, opacity: 0.5 }} />
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", gap: 12, marginTop: 4 }}>
+                        {p.attack > 0 && <span style={{ fontSize: 10, color: posColor.Attack }}>⚔️ {fmt(p.attack)}</span>}
+                        {p.mid > 0 && <span style={{ fontSize: 10, color: posColor.Midfield }}>🔄 {fmt(p.mid)}</span>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
+
+          {/* Per-game history */}
+          {seasonGames.length > 0 && (
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 800, color: C.muted, letterSpacing: 1, marginBottom: 10 }}>GAME HISTORY</div>
+              {[...seasonGames].reverse().map(g => (
+                <div key={g.id} style={{ background: C.card, borderRadius: 10, padding: "10px 12px", marginBottom: 8, border: `1px solid ${C.border}` }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                    <span style={{ fontWeight: 800, fontSize: 13, color: C.text }}>{g.label}</span>
+                    <span style={{ fontSize: 10, color: C.muted }}>{g.date}</span>
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                    {[...g.players].sort((a,b) => b.total - a.total).filter(p => p.total > 0).map(p => (
+                      <span key={p.name} style={{ fontSize: 10, background: C.surface, borderRadius: 5, padding: "2px 7px", color: C.muted }}>
+                        <span style={{ color: C.text, fontWeight: 700 }}>{p.name}</span> {fmt(p.total)}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Reusable position section ────────────────────────────────────────────────
+function PositionSection({ pos, field, players, selected, onTapSlot, C, onRotate, rotateLabel, nextLabel }) {
+  const slots = FIELD_SPOTS[pos];
+  const maxTime = Math.max(...players.map(p => totalTime(p.times)), 1);
+
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+        <div style={{ width: 7, height: 7, borderRadius: "50%", background: posColor[pos] }} />
+        <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: 2, color: posColor[pos] }}>{pos.toUpperCase()}</span>
+        {onRotate && (
+          <button onClick={onRotate}
+            style={{ marginLeft: 2, background: `${posColor[pos]}18`, border: `1px solid ${posColor[pos]}55`, borderRadius: 6, color: posColor[pos], padding: "3px 10px", fontSize: 10, fontWeight: 800, cursor: "pointer" }}>
+            {rotateLabel}
+          </button>
+        )}
+        {nextLabel && <span style={{ fontSize: 9, color: C.muted }}>next: {nextLabel}</span>}
+        <div style={{ flex: 1, height: 1, background: C.border }} />
+      </div>
+
+      <div style={{ display: "flex", gap: 8 }}>
+        {Array.from({ length: slots }).map((_, idx) => {
+          const pid    = field[pos]?.[idx] ?? null;
+          const player = pid ? players.find(p => p.id === pid) : null;
+          const isSel  = selected?.id === pid && pid !== null;
+          const isDrop = !!selected && !isSel;
+          const posTime = player?.times[pos] ?? 0;
+          const tot     = player ? totalTime(player.times) : 0;
+
+          return (
+            <div key={idx} onClick={() => onTapSlot(pos, idx)}
+              style={{
+                flex: 1, minHeight: 76, borderRadius: 10, cursor: "pointer", transition: "all 0.15s",
+                border: `2px ${isSel ? "solid" : "dashed"} ${isSel ? C.accent : isDrop ? posColor[pos] : C.border}`,
+                background: isSel ? `${C.accent}22` : isDrop && !player ? `${posColor[pos]}12` : C.card,
+                boxShadow: isSel ? `0 0 14px ${C.accent}44` : "none",
+                transform: isSel ? "scale(1.03)" : "scale(1)",
+                display: "flex", alignItems: "center", justifyContent: "center",
+              }}>
+              {player ? (
+                <div style={{ width: "100%", padding: "7px 8px", textAlign: "center" }}>
+                  <div style={{ fontSize: 13, fontWeight: 800 }}>{player.name}</div>
+                  <div style={{ fontSize: 9, marginTop: 3, display: "flex", justifyContent: "center", gap: 5 }}>
+                    <span style={{ color: posColor[pos] }}>{fmt(posTime)}</span>
+                    <span style={{ color: C.muted }}>|</span>
+                    <span style={{ color: C.accent }}>{fmt(tot)}</span>
+                  </div>
+                  <div style={{ marginTop: 4, height: 3, background: C.border, borderRadius: 2, overflow: "hidden" }}>
+                    <div style={{ height: "100%", width: `${(tot / maxTime) * 100}%`, background: tot / maxTime > 0.8 ? C.warn : C.accent, transition: "width 1s" }} />
+                  </div>
+                </div>
+              ) : (
+                <div style={{ fontSize: 20, color: isDrop ? posColor[pos] : C.border }}>{isDrop ? "↓" : "+"}</div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── Roster group (Defense / Goalie) ──────────────────────────────────────────
+function RosterGroup({ title, color, emoji, players, onRemove, onAdd, C }) {
+  return (
+    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 14, marginBottom: 14 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+        <span style={{ fontSize: 11, fontWeight: 800, color: C.muted, letterSpacing: 1 }}>{emoji} {title} ({players.length})</span>
+        <button onClick={onAdd} style={{ background: "transparent", border: `1px solid ${C.border}`, borderRadius: 6, color: color, padding: "2px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>+ Add</button>
+      </div>
+      {players.map(p => (
+        <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5, padding: "5px 8px", background: C.surface, borderRadius: 8 }}>
+          <div style={{ flex: 1, fontWeight: 700, fontSize: 13 }}>{p.name}</div>
+          <button onClick={() => onRemove(p.id)} style={{ background: "none", border: "none", color: C.red, cursor: "pointer", fontSize: 13 }}>✕</button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+  </script>
+</body>
+</html>
