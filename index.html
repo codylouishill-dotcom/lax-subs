@@ -63,7 +63,7 @@ function emptyTimes() { return { Attack: 0, Midfield: 0, Defense: 0, Goalie: 0 }
 function totalTime(t)  { return Object.values(t).reduce((a, b) => a + b, 0); }
 
 function initPlayer(p, role) {
-  return { ...p, role, canPlayDefense: p.canPlayDefense ?? false, times: emptyTimes(), onField: false, currentPos: null };
+  return { ...p, role, canPlayDefense: p.canPlayDefense ?? false, absent: p.absent ?? false, times: emptyTimes(), onField: false, currentPos: null };
 }
 
 // Given pool players and how many attack spots, suggest a balanced split
@@ -162,10 +162,10 @@ const GAME_KEY     = "lax_game_v1";
 function saveRoster(pool, midOnly, defense, goalies) {
   try {
     localStorage.setItem(ROSTER_KEY, JSON.stringify({
-      pool:    pool.map(p    => ({ id: p.id, name: p.name, canPlayDefense: p.canPlayDefense ?? false })),
-      midOnly: midOnly.map(p => ({ id: p.id, name: p.name, canPlayDefense: p.canPlayDefense ?? false })),
-      defense: defense.map(p => ({ id: p.id, name: p.name, canPlayMid: p.canPlayMid ?? false })),
-      goalies: goalies.map(p => ({ id: p.id, name: p.name })),
+      pool:    pool.map(p    => ({ id: p.id, name: p.name, canPlayDefense: p.canPlayDefense ?? false, absent: p.absent ?? false })),
+      midOnly: midOnly.map(p => ({ id: p.id, name: p.name, canPlayDefense: p.canPlayDefense ?? false, absent: p.absent ?? false })),
+      defense: defense.map(p => ({ id: p.id, name: p.name, canPlayMid: p.canPlayMid ?? false, absent: p.absent ?? false })),
+      goalies: goalies.map(p => ({ id: p.id, name: p.name, absent: p.absent ?? false })),
     }));
   } catch(e) {}
 }
@@ -319,12 +319,12 @@ function App() {
 
   // ── Current quarter's pool assignments ────────────────────────────────────
   const curAssign = qAssignments[quarter - 1];
-  const atkPool   = pool.filter(p => curAssign.find(a => a.id === p.id && a.qRole === "Attack"));
-  const midPool   = pool.filter(p => curAssign.find(a => a.id === p.id && a.qRole === "Midfield"));
+  const atkPool   = pool.filter(p => !p.absent && curAssign.find(a => a.id === p.id && a.qRole === "Attack"));
+  const midPool   = pool.filter(p => !p.absent && curAssign.find(a => a.id === p.id && a.qRole === "Midfield"));
   // Full mid queue: midOnly first, then pool kids assigned to mid this quarter,
-  // then any defenders with canPlayMid who aren't currently in a Defense slot
-  const flexDefenders = defense.filter(p => p.canPlayMid && !field.Defense.includes(p.id));
-  const defaultMidQueue = [...midOnly, ...midPool, ...flexDefenders];
+  // then any defenders with canPlayMid — all non-absent
+  const flexDefenders = defense.filter(p => p.canPlayMid && !p.absent && !field.Defense.includes(p.id));
+  const defaultMidQueue = [...midOnly.filter(p => !p.absent), ...midPool, ...flexDefenders];
   const fullMidQueue = midQueueOrder.length > 0
     ? [...midQueueOrder.map(id => defaultMidQueue.find(p => p.id === id)).filter(Boolean),
        ...defaultMidQueue.filter(p => !midQueueOrder.includes(p.id))]
@@ -526,6 +526,13 @@ function App() {
 
   function toggleCanPlayMid(id) {
     setDefense(prev => prev.map(p => p.id === id ? { ...p, canPlayMid: !p.canPlayMid } : p));
+  }
+
+  function toggleAbsent(id) {
+    const toggle = prev => prev.map(p => p.id === id ? { ...p, absent: !p.absent } : p);
+    setPool(toggle); setMidOnly(toggle); setDefense(toggle); setGoalies(toggle);
+    // Remove from field and qAssignments if marked absent
+    setField(prev => { const n = {}; for (const pos of Object.keys(prev)) n[pos] = prev[pos].filter(x => x !== id); return n; });
   }
 
   function restoreGame(saved) {
@@ -749,12 +756,27 @@ function App() {
         <div style={{ padding: 16 }}>
           <div style={{ fontSize: 11, color: C.muted, letterSpacing: 1, marginBottom: 16 }}>PRE-GAME · ASSIGN PLAYERS TO GROUPS</div>
 
+          {/* Absent players notice */}
+          {(() => {
+            const absentAll = [...pool, ...midOnly, ...defense, ...goalies].filter(p => p.absent);
+            if (absentAll.length === 0) return null;
+            return (
+              <div style={{ background: `${C.red}15`, border: `1px solid ${C.red}55`, borderRadius: 8, padding: "8px 12px", marginBottom: 14, display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 13 }}>🚫</span>
+                <div>
+                  <span style={{ fontSize: 10, fontWeight: 800, color: C.red, letterSpacing: 1 }}>ABSENT: </span>
+                  <span style={{ fontSize: 11, color: C.red }}>{absentAll.map(p => p.name).join(", ")}</span>
+                </div>
+              </div>
+            );
+          })()}
+
           {/* Quarter assignment grid */}
           <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 14, marginBottom: 20 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
               <span style={{ fontSize: 11, fontWeight: 800, color: C.muted, letterSpacing: 1 }}>QUARTER ASSIGNMENTS — ATTACK/MID POOL</span>
               <button onClick={() => {
-                const balanced = balanceAllQuarters(pool, NUM_QUARTERS, midOnly.length);
+                const balanced = balanceAllQuarters(pool.filter(p => !p.absent), NUM_QUARTERS, midOnly.filter(p => !p.absent).length);
                 setQAssignments(balanced);
               }}
                 style={{ background: `${C.accent}18`, border: `1px solid ${C.accent}55`, borderRadius: 6, color: C.accent, padding: "3px 10px", fontSize: 10, fontWeight: 800, cursor: "pointer" }}>
@@ -763,8 +785,8 @@ function App() {
             </div>
             {Array.from({ length: NUM_QUARTERS }).map((_, qi) => {
               const qa = qAssignments[qi];
-              const atkGroup = pool.filter(p => qa.find(a => a.id === p.id && a.qRole === "Attack"));
-              const midGroup = pool.filter(p => qa.find(a => a.id === p.id && a.qRole === "Midfield"));
+              const atkGroup = pool.filter(p => !p.absent && qa.find(a => a.id === p.id && a.qRole === "Attack"));
+              const midGroup = pool.filter(p => !p.absent && qa.find(a => a.id === p.id && a.qRole === "Midfield"));
               const isCurrent = qi + 1 === quarter;
               return (
                 <div key={qi} style={{ marginBottom: qi < 3 ? 12 : 0, padding: "8px 10px", borderRadius: 8, background: isCurrent ? `${C.accent}12` : "transparent", border: `1px solid ${isCurrent ? C.accent : "transparent"}` }}>
@@ -803,8 +825,13 @@ function App() {
               <button onClick={() => setAddingTo("midOnly")} style={{ background: "transparent", border: `1px solid ${C.border}`, borderRadius: 6, color: posColor.Midfield, padding: "2px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>+ Add</button>
             </div>
             {midOnly.map(p => (
-              <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5, padding: "5px 8px", background: C.surface, borderRadius: 8 }}>
-                <div style={{ flex: 1, fontWeight: 700, fontSize: 13 }}>{p.name}</div>
+              <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5, padding: "5px 8px", background: p.absent ? `${C.red}12` : C.surface, borderRadius: 8, opacity: p.absent ? 0.7 : 1 }}>
+                <div style={{ flex: 1, fontWeight: 700, fontSize: 13, textDecoration: p.absent ? "line-through" : "none", color: p.absent ? C.muted : C.text }}>{p.name}</div>
+                <button onClick={() => toggleAbsent(p.id)}
+                  title={p.absent ? "Mark present" : "Mark absent"}
+                  style={{ padding: "2px 7px", borderRadius: 5, border: `1px solid ${p.absent ? C.red : C.border}`, background: p.absent ? `${C.red}22` : "transparent", color: p.absent ? C.red : C.muted, fontSize: 10, fontWeight: 700, cursor: "pointer" }}>
+                  {p.absent ? "absent" : "✓"}
+                </button>
                 <button onClick={() => toggleCanPlayDefense(p.id)}
                   title="Can play defense"
                   style={{ padding: "2px 7px", borderRadius: 5, border: `1px solid ${p.canPlayDefense ? posColor.Defense : C.border}`, background: p.canPlayDefense ? `${posColor.Defense}22` : "transparent", color: p.canPlayDefense ? posColor.Defense : C.muted, fontSize: 10, fontWeight: 700, cursor: "pointer" }}>
@@ -822,8 +849,13 @@ function App() {
               <button onClick={() => setAddingTo("defense")} style={{ background: "transparent", border: `1px solid ${C.border}`, borderRadius: 6, color: posColor.Defense, padding: "2px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>+ Add</button>
             </div>
             {defense.map(p => (
-              <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5, padding: "5px 8px", background: C.surface, borderRadius: 8 }}>
-                <div style={{ flex: 1, fontWeight: 700, fontSize: 13 }}>{p.name}</div>
+              <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5, padding: "5px 8px", background: p.absent ? `${C.red}12` : C.surface, borderRadius: 8, opacity: p.absent ? 0.7 : 1 }}>
+                <div style={{ flex: 1, fontWeight: 700, fontSize: 13, textDecoration: p.absent ? "line-through" : "none", color: p.absent ? C.muted : C.text }}>{p.name}</div>
+                <button onClick={() => toggleAbsent(p.id)}
+                  title={p.absent ? "Mark present" : "Mark absent"}
+                  style={{ padding: "2px 7px", borderRadius: 5, border: `1px solid ${p.absent ? C.red : C.border}`, background: p.absent ? `${C.red}22` : "transparent", color: p.absent ? C.red : C.muted, fontSize: 10, fontWeight: 700, cursor: "pointer" }}>
+                  {p.absent ? "absent" : "✓"}
+                </button>
                 <button onClick={() => toggleCanPlayMid(p.id)}
                   title="Can play midfield"
                   style={{ padding: "2px 7px", borderRadius: 5, border: `1px solid ${p.canPlayMid ? posColor.Midfield : C.border}`, background: p.canPlayMid ? `${posColor.Midfield}22` : "transparent", color: p.canPlayMid ? posColor.Midfield : C.muted, fontSize: 10, fontWeight: 700, cursor: "pointer" }}>
@@ -836,7 +868,7 @@ function App() {
 
           {/* Goalie */}
           <RosterGroup title="GOALIE" color={posColor.Goalie} emoji={posEmoji.Goalie} players={goalies}
-            onRemove={removePlayer} onAdd={() => setAddingTo("goalie")} C={C} />
+            onRemove={removePlayer} onAdd={() => setAddingTo("goalie")} onAbsent={toggleAbsent} C={C} />
 
           {/* Add player modal */}
           {addingTo && (
@@ -886,10 +918,15 @@ function App() {
               <button onClick={() => setAddingTo("pool")} style={{ background: "transparent", border: `1px solid ${C.border}`, borderRadius: 6, color: C.accent, padding: "2px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>+ Add</button>
             </div>
             {pool.map(p => (
-              <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, padding: "6px 8px", background: C.surface, borderRadius: 8 }}>
-                <div style={{ flex: 1, fontWeight: 700, fontSize: 13 }}>{p.name}</div>
-                <span style={{ fontSize: 10, color: posColor.Attack }}>Atk {fmt(p.times.Attack)}</span>
-                <span style={{ fontSize: 10, color: posColor.Midfield }}>Mid {fmt(p.times.Midfield)}</span>
+              <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, padding: "6px 8px", background: p.absent ? `${C.red}12` : C.surface, borderRadius: 8, opacity: p.absent ? 0.7 : 1 }}>
+                <div style={{ flex: 1, fontWeight: 700, fontSize: 13, textDecoration: p.absent ? "line-through" : "none", color: p.absent ? C.muted : C.text }}>{p.name}</div>
+                {!p.absent && <span style={{ fontSize: 10, color: posColor.Attack }}>Atk {fmt(p.times.Attack)}</span>}
+                {!p.absent && <span style={{ fontSize: 10, color: posColor.Midfield }}>Mid {fmt(p.times.Midfield)}</span>}
+                <button onClick={() => toggleAbsent(p.id)}
+                  title={p.absent ? "Mark present" : "Mark absent"}
+                  style={{ padding: "2px 7px", borderRadius: 5, border: `1px solid ${p.absent ? C.red : C.border}`, background: p.absent ? `${C.red}22` : "transparent", color: p.absent ? C.red : C.muted, fontSize: 10, fontWeight: 700, cursor: "pointer" }}>
+                  {p.absent ? "absent" : "✓"}
+                </button>
                 <button onClick={() => toggleCanPlayDefense(p.id)}
                   title="Can play defense"
                   style={{ padding: "2px 7px", borderRadius: 5, border: `1px solid ${p.canPlayDefense ? posColor.Defense : C.border}`, background: p.canPlayDefense ? `${posColor.Defense}22` : "transparent", color: p.canPlayDefense ? posColor.Defense : C.muted, fontSize: 10, fontWeight: 700, cursor: "pointer" }}>
@@ -1350,7 +1387,7 @@ function PositionSection({ pos, field, players, selected, onTapSlot, C, onRotate
 }
 
 // ── Roster group (Defense / Goalie) ──────────────────────────────────────────
-function RosterGroup({ title, color, emoji, players, onRemove, onAdd, C }) {
+function RosterGroup({ title, color, emoji, players, onRemove, onAdd, onAbsent, C }) {
   return (
     <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 14, marginBottom: 14 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
@@ -1358,8 +1395,14 @@ function RosterGroup({ title, color, emoji, players, onRemove, onAdd, C }) {
         <button onClick={onAdd} style={{ background: "transparent", border: `1px solid ${C.border}`, borderRadius: 6, color: color, padding: "2px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>+ Add</button>
       </div>
       {players.map(p => (
-        <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5, padding: "5px 8px", background: C.surface, borderRadius: 8 }}>
-          <div style={{ flex: 1, fontWeight: 700, fontSize: 13 }}>{p.name}</div>
+        <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5, padding: "5px 8px", background: p.absent ? `${C.red}12` : C.surface, borderRadius: 8, opacity: p.absent ? 0.7 : 1 }}>
+          <div style={{ flex: 1, fontWeight: 700, fontSize: 13, textDecoration: p.absent ? "line-through" : "none", color: p.absent ? C.muted : C.text }}>{p.name}</div>
+          {onAbsent && (
+            <button onClick={() => onAbsent(p.id)}
+              style={{ padding: "2px 7px", borderRadius: 5, border: `1px solid ${p.absent ? C.red : C.border}`, background: p.absent ? `${C.red}22` : "transparent", color: p.absent ? C.red : C.muted, fontSize: 10, fontWeight: 700, cursor: "pointer" }}>
+              {p.absent ? "absent" : "✓"}
+            </button>
+          )}
           <button onClick={() => onRemove(p.id)} style={{ background: "none", border: "none", color: C.red, cursor: "pointer", fontSize: 13 }}>✕</button>
         </div>
       ))}
